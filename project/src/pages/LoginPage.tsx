@@ -4,15 +4,24 @@ import { Brain, Mail, Lock, ArrowLeft } from 'lucide-react';
 import { Button } from '../components/Button';
 import { Card } from '../components/Card';
 import { useState } from 'react';
+import { useApp } from '../context/AppContext';
 
 export function LoginPage() {
   const navigate = useNavigate();
+  const { login, guest } = useApp();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
 
   const handleLogin = (e: React.FormEvent) => {
     e.preventDefault();
-    navigate('/dashboard');
+    setError(null);
+    setLoading(true);
+    login(email, password)
+      .then(() => navigate('/dashboard'))
+      .catch((err) => setError(err?.message || 'Login failed'))
+      .finally(() => setLoading(false));
   };
 
   return (
@@ -82,17 +91,30 @@ export function LoginPage() {
             </div>
 
             <Button type="submit" variant="primary" className="w-full mt-6">
-              Sign In
+              {loading ? 'Signing in...' : 'Sign In'}
             </Button>
           </form>
 
           <div className="mt-6 text-center">
-            <button
-              onClick={() => navigate('/dashboard')}
-              className="text-sm text-gray-600 dark:text-gray-400 hover:text-violet-600 dark:hover:text-violet-400 transition-colors"
-            >
-              Continue as Guest
-            </button>
+            <div className="text-sm">
+              Don't have an account? <button onClick={() => navigate('/register')} className="text-violet-600">Register</button>
+            </div>
+            <div className="mt-3">
+              <button
+                onClick={async () => {
+                  try {
+                    await guest();
+                  } catch (err) {
+                    // ignore guest errors
+                  }
+                  navigate('/dashboard');
+                }}
+                className="text-sm text-gray-600 dark:text-gray-400 hover:text-violet-600 dark:hover:text-violet-400 transition-colors"
+              >
+                Continue as Guest
+              </button>
+            </div>
+            {error && <div className="text-sm text-red-600 mt-3">{error}</div>}
           </div>
         </Card>
       </motion.div>

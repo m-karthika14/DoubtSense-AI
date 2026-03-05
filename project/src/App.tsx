@@ -9,10 +9,12 @@ import { Dashboard } from './pages/Dashboard';
 import { StudyView } from './pages/StudyView';
 import { InsightsPage } from './pages/InsightsPage';
 import { SettingsPage } from './pages/SettingsPage';
+import { RegisterPage } from './pages/RegisterPage';
 
 function AnimatedRoutes() {
   const location = useLocation();
-  const showNav = location.pathname !== '/login' && location.pathname !== '/';
+  // hide navbar on intro, login and register pages
+  const showNav = !['/', '/login', '/register'].includes(location.pathname);
 
   return (
     <>
@@ -21,6 +23,7 @@ function AnimatedRoutes() {
         <Routes location={location} key={location.pathname}>
           <Route path="/" element={<IntroPage />} />
           <Route path="/login" element={<LoginPage />} />
+          <Route path="/register" element={<RegisterPage />} />
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/study" element={<StudyView />} />
           <Route path="/insights" element={<InsightsPage />} />

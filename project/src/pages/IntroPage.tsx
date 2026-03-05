@@ -1,10 +1,12 @@
 import { motion } from 'framer-motion';
 import { useNavigate } from 'react-router-dom';
+import { useApp } from '../context/AppContext';
 import { Brain } from 'lucide-react';
 import { Button } from '../components/Button';
 
 export function IntroPage() {
   const navigate = useNavigate();
+  const { guest } = useApp();
 
   return (
     <div className="min-h-screen flex items-center justify-center gradient-bg relative overflow-hidden">
@@ -57,7 +59,17 @@ export function IntroPage() {
           <Button variant="primary" onClick={() => navigate('/login')}>
             Login
           </Button>
-          <Button variant="secondary" onClick={() => navigate('/dashboard')}>
+          <Button
+            variant="secondary"
+            onClick={async () => {
+              try {
+                await guest();
+              } catch (err) {
+                // ignore guest creation error and continue
+              }
+              navigate('/dashboard');
+            }}
+          >
             Try as Guest
           </Button>
         </motion.div>
