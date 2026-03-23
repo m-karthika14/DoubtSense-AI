@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, ReactNode } from 'react';
+import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
 
 interface AppUser {
   id?: string;
@@ -27,8 +27,18 @@ interface AppContextType {
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
+const AGENT_ACTIVE_KEY = 'doubtsense_agentActive';
+
 export function AppProvider({ children }: { children: ReactNode }) {
-  const [agentActive, setAgentActive] = useState(true);
+  const [agentActive, setAgentActive] = useState(() => {
+    try {
+      const raw = localStorage.getItem(AGENT_ACTIVE_KEY);
+      if (raw === null) return true;
+      return raw === 'true';
+    } catch {
+      return true;
+    }
+  });
   const [cameraActive, setCameraActive] = useState(false);
   const [currentTopic, setCurrentTopic] = useState('');
   const [user, setUser] = useState<AppUser | null>(() => {
@@ -39,9 +49,32 @@ export function AppProvider({ children }: { children: ReactNode }) {
       return null;
     }
   });
+
+  // Persist agentActive so other clients (e.g., extension) can read a stable source of truth.
+  useEffect(() => {
+    try {
+      localStorage.setItem(AGENT_ACTIVE_KEY, String(agentActive));
+    } catch {
+      // ignore
+    }
+  }, [agentActive]);
   // Backend-backed auth functions
   // Vite exposes env vars on import.meta.env; `process` is unavailable in the browser.
   const API = (import.meta.env.VITE_API_URL as string) || 'http://localhost:4000';
+
+  const syncAgentStatusToBackend = async (nextAgentActive: boolean) => {
+    const userId = user?.userId;
+    if (!userId) return;
+    try {
+      await fetch(`${API}/api/agent/status`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId, agentActive: nextAgentActive })
+      });
+    } catch {
+      // ignore; local storage remains source-of-truth
+    }
+  };
 
   const register = async (email: string, password: string, name?: string) => {
     const res = await fetch(`${API}/api/auth/register`, {
@@ -58,6 +91,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
     u.token = token;
     setUser(u);
     localStorage.setItem('doubtsense_user', JSON.stringify(u));
+    void fetch(`${API}/api/agent/status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: u.userId, agentActive })
+    }).catch(() => {});
   };
 
   const checkName = async (name: string) => {
@@ -87,6 +125,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
     u.token = token;
     setUser(u);
     localStorage.setItem('doubtsense_user', JSON.stringify(u));
+    void fetch(`${API}/api/agent/status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: u.userId, agentActive })
+    }).catch(() => {});
   };
 
   const guest = async () => {
@@ -100,6 +143,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
     u.token = token;
     setUser(u);
     localStorage.setItem('doubtsense_user', JSON.stringify(u));
+    void fetch(`${API}/api/agent/status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: u.userId, agentActive })
+    }).catch(() => {});
   };
 
   const logout = () => {
@@ -107,7 +155,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
     localStorage.removeItem('doubtsense_user');
   };
 
-  const toggleAgent = () => setAgentActive(prev => !prev);
+  const toggleAgent = () =>
+    setAgentActive(prev => {
+      const next = !prev;
+      // Persist immediately
+      try {
+        localStorage.setItem(AGENT_ACTIVE_KEY, String(next));
+      } catch {
+        // ignore
+      }
+      // Best-effort backend sync for extension fail-safe
+      void syncAgentStatusToBackend(next);
+      return next;
+    });
   const toggleCamera = () => setCameraActive(prev => !prev);
 
   // (no demo auth) backend-backed functions above

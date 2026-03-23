@@ -28,5 +28,10 @@ API
 - POST /api/auth/login { email, password } -> { token, user }
 - GET /api/auth/me -> { user } (requires Authorization: Bearer <token>)
 
+- POST /api/upload (multipart/form-data)
+	- Fields: `userId` (string), `agentActive` ("true"), optional `sourceType`, optional `sourceUrl`, optional `title`
+	- File field name: `file`
+	- Supported: `.pdf`, `.docx`, `.pptx`
+
 Notes
 - This backend is intentionally minimal. It uses `bcryptjs` for password hashing and `jsonwebtoken` for simple JWTs. For production, use HTTPS, proper secret management, input validation, rate limiting, and stronger security practices.
