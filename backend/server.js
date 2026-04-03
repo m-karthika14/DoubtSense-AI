@@ -1,11 +1,11 @@
 // Lightweight entry file so you can run `node server.js` from the backend root
 // It loads env, prints a short startup message, and delegates to the existing src/index.js
-require('dotenv').config();
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 console.log('[server.js] Booting DoubtSense backend (server.js entry)');
 
 const express = require('express');
 const cors = require('cors');
-const path = require('path');
 const connectDB = require('./src/config/db');
 const authRoutes = require('./src/routes/auth');
 const uploadRoutes = require('./src/routes/upload');
@@ -15,6 +15,8 @@ const contentRoutes = require('./src/routes/content');
 const faceDataRoutes = require('./src/routes/faceData');
 const confusionRoutes = require('./src/routes/confusion');
 const behaviorVectorRoutes = require('./src/routes/behaviorVector');
+const explainRoutes = require('./src/routes/explain');
+const feedbackRoutes = require('./src/routes/feedback');
 
 const app = express();
 app.use(cors());
@@ -35,6 +37,8 @@ app.use('/api', contentRoutes);
 app.use('/api', faceDataRoutes);
 app.use('/api', confusionRoutes);
 app.use('/api', behaviorVectorRoutes);
+app.use('/api', explainRoutes);
+app.use('/api', feedbackRoutes);
 
 const DEFAULT_PORT = 4000;
 const explicitPort = typeof process.env.PORT === 'string' && process.env.PORT.trim().length > 0;

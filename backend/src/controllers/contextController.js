@@ -98,6 +98,9 @@ async function postContext(req, res) {
       {
         userId,
         activeTopic: topic,
+        headings,
+        title: title || '',
+        paragraph,
         sourceType: 'website',
         contentId: contentId || null,
         sectionId: 'main',

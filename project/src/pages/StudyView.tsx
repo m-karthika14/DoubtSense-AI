@@ -1,5 +1,6 @@
 import { motion } from 'framer-motion';
 import { AutoHelpPopup } from '../components/AutoHelpPopup';
+import { Button } from '../components/Button';
 import { Upload, FileText } from 'lucide-react';
 import { type ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from '../context/AppContext';
@@ -15,6 +16,19 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL(
 
 export function StudyView() {
   const [showHelp, setShowHelp] = useState(false);
+  const [helpLevel, setHelpLevel] = useState<1 | 2 | 3>(1);
+  const [helpTopic, setHelpTopic] = useState('General');
+  const [helpLoaded, setHelpLoaded] = useState(false);
+  const [helpLoading, setHelpLoading] = useState(false);
+  const [helpExplanations, setHelpExplanations] = useState<{ level1: string; level2: string; level3: string }>({
+    level1: '',
+    level2: '',
+    level3: '',
+  });
+  const [helpDoubt, setHelpDoubt] = useState('');
+  const [helpAnswer, setHelpAnswer] = useState('');
+  const [helpAnswerLoading, setHelpAnswerLoading] = useState(false);
+
   const [hasDocument, setHasDocument] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -45,6 +59,8 @@ export function StudyView() {
   const lastBehaviorSentAtMsRef = useRef<number>(0);
 
   const { setCurrentTopic, currentTopic, agentActive, cameraActive, user, guest } = useApp();
+
+  const userId = user?.userId;
 
   const API = useMemo(() => {
     return (import.meta.env.VITE_API_URL as string) || 'http://localhost:4000';
@@ -78,7 +94,7 @@ export function StudyView() {
   }, [contentDoc, fileUrl]);
 
   useEffect(() => {
-    if (agentActive && hasDocument) {
+    if (agentActive && hasDocument && userId) {
       const HELP_POPUP_INTERVAL_MS = 10000;
 
       const intervalId = window.setInterval(() => {
@@ -87,7 +103,119 @@ export function StudyView() {
 
       return () => window.clearInterval(intervalId);
     }
-  }, [setCurrentTopic, agentActive, hasDocument]);
+  }, [setCurrentTopic, agentActive, hasDocument, userId]);
+
+  // Initialize popup state when opened (no LLM call here).
+  useEffect(() => {
+    if (!showHelp) return;
+    setHelpLevel(1);
+    setHelpLoaded(false);
+    setHelpLoading(false);
+    setHelpTopic((currentTopic && currentTopic.trim()) ? currentTopic.trim() : 'General');
+    setHelpExplanations({
+      level1: 'I can explain this in more detail. Click “Show More” to get an explanation.',
+      level2: '',
+      level3: '',
+    });
+    setHelpDoubt('');
+    setHelpAnswer('');
+    setHelpAnswerLoading(false);
+  }, [showHelp, currentTopic]);
+
+  const getHelpTextForLevel = useCallback((level: 1 | 2 | 3) => {
+    if (level === 1) return helpExplanations.level1;
+    if (level === 2) return helpExplanations.level2;
+    return helpExplanations.level3;
+  }, [helpExplanations.level1, helpExplanations.level2, helpExplanations.level3]);
+
+  const fetchExplainIfNeeded = useCallback(async () => {
+    if (!userId) return;
+    if (helpLoaded || helpLoading) return;
+    setHelpLoading(true);
+    setHelpExplanations((prev) => ({ ...prev, level1: 'Loading explanation...' }));
+    try {
+      const resp = await fetch(`${API}/api/explain`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId, agentActive: true }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error('Explain failed');
+
+      const topic = typeof data?.topic === 'string' && data.topic.trim() ? data.topic.trim() : helpTopic;
+      setHelpTopic(topic);
+      setHelpExplanations({
+        level1: typeof data?.level1 === 'string' ? data.level1 : '',
+        level2: typeof data?.level2 === 'string' ? data.level2 : '',
+        level3: typeof data?.level3 === 'string' ? data.level3 : '',
+      });
+      setHelpLoaded(true);
+    } catch {
+      setHelpExplanations({
+        level1: 'Sorry — I could not load an explanation right now.',
+        level2: 'Sorry — I could not load an explanation right now.',
+        level3: 'Sorry — I could not load an explanation right now.',
+      });
+      setHelpLoaded(true);
+    } finally {
+      setHelpLoading(false);
+    }
+  }, [API, helpLoaded, helpLoading, helpTopic, userId]);
+
+  const onHelpShowMore = useCallback(async () => {
+    if (!userId) return;
+    // METHOD 3 — CALL ONLY ON USER ACTION
+    // Only call /api/explain when the user requests more (moving from Level 1 -> Level 2).
+    if (helpLevel === 1 && !helpLoaded && !helpLoading) {
+      await fetchExplainIfNeeded();
+      setHelpLevel(2);
+      return;
+    }
+
+    setHelpLevel((prev) => (prev < 3 ? ((prev + 1) as 1 | 2 | 3) : 3));
+  }, [fetchExplainIfNeeded, helpLevel, helpLoaded, helpLoading, userId]);
+
+  const onHelpUnderstand = useCallback(async () => {
+    try {
+      if (!userId) return;
+      await fetch(`${API}/api/feedback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId,
+          topic: helpTopic,
+          levelSeen: helpLevel,
+          understood: true,
+        }),
+      });
+    } catch {
+      // ignore
+    } finally {
+      setShowHelp(false);
+    }
+  }, [API, helpLevel, helpTopic, userId]);
+
+  const onHelpSubmitDoubt = useCallback(async () => {
+    if (!userId) return;
+    const question = helpDoubt.trim();
+    if (!question) return;
+    setHelpAnswerLoading(true);
+    setHelpAnswer('Thinking...');
+    try {
+      const resp = await fetch(`${API}/api/ask-doubt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId, topic: helpTopic, question }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      const answer = typeof data?.answer === 'string' ? data.answer : '';
+      setHelpAnswer(answer || 'No answer returned.');
+    } catch {
+      setHelpAnswer('Failed to get an answer.');
+    } finally {
+      setHelpAnswerLoading(false);
+    }
+  }, [API, helpDoubt, helpTopic, userId]);
 
   // Hydrate current context (if any) when user becomes available
   useEffect(() => {
@@ -858,10 +986,34 @@ export function StudyView() {
       <AutoHelpPopup
         isOpen={showHelp}
         onClose={() => setShowHelp(false)}
-        message="I noticed you've been on this integration problem for a while. The key is to choose u = x because it simplifies when differentiated. Would you like me to walk through the steps?"
-        onShowMore={() => {
-          setShowHelp(false);
-        }}
+        topic={helpTopic}
+        level={helpLevel}
+        text={getHelpTextForLevel(helpLevel)}
+        onUnderstand={onHelpUnderstand}
+        onShowMore={helpLevel < 3 ? onHelpShowMore : undefined}
+        showMoreDisabled={helpLoading || !userId}
+        extra={
+          helpLevel === 3 ? (
+            <div className="space-y-2">
+              <input
+                value={helpDoubt}
+                onChange={(e) => setHelpDoubt(e.target.value)}
+                placeholder="Ask your doubt..."
+                className="w-full rounded-xl border border-gray-200 dark:border-white/10 bg-white dark:bg-white/5 px-4 py-3 text-sm text-gray-900 dark:text-gray-100 outline-none"
+              />
+              <div className="flex justify-end">
+                <Button variant="secondary" onClick={onHelpSubmitDoubt} disabled={helpAnswerLoading || !helpDoubt.trim()}>
+                  Submit
+                </Button>
+              </div>
+              {helpAnswer ? (
+                <div className="text-sm text-gray-700 dark:text-gray-300 whitespace-pre-wrap">
+                  {helpAnswer}
+                </div>
+              ) : null}
+            </div>
+          ) : null
+        }
       />
     </div>
   );

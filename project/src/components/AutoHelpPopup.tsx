@@ -5,11 +5,26 @@ import { Button } from './Button';
 interface AutoHelpPopupProps {
   isOpen: boolean;
   onClose: () => void;
-  message: string;
+  topic: string;
+  level: 1 | 2 | 3;
+  text: string;
   onShowMore?: () => void;
+  showMoreDisabled?: boolean;
+  onUnderstand?: () => void;
+  extra?: React.ReactNode;
 }
 
-export function AutoHelpPopup({ isOpen, onClose, message, onShowMore }: AutoHelpPopupProps) {
+export function AutoHelpPopup({
+  isOpen,
+  onClose,
+  topic,
+  level,
+  text,
+  onShowMore,
+  showMoreDisabled,
+  onUnderstand,
+  extra,
+}: AutoHelpPopupProps) {
   return (
     <AnimatePresence>
       {isOpen && (
@@ -26,7 +41,7 @@ export function AutoHelpPopup({ isOpen, onClose, message, onShowMore }: AutoHelp
             animate={{ scale: 1, opacity: 1, y: 0 }}
             exit={{ scale: 0.8, opacity: 0, y: 20 }}
             transition={{ type: 'spring', damping: 25, stiffness: 300 }}
-            className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-full max-w-lg"
+            className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-[92vw] max-w-2xl"
           >
             <div className="glassmorphic rounded-3xl p-8 shadow-2xl">
               <div className="flex items-start justify-between mb-4">
@@ -40,7 +55,9 @@ export function AutoHelpPopup({ isOpen, onClose, message, onShowMore }: AutoHelp
                   </motion.div>
                   <div>
                     <h3 className="font-bold text-xl text-gray-900 dark:text-white">Need Help?</h3>
-                    <p className="text-sm text-gray-600 dark:text-gray-400">I noticed you might be stuck</p>
+                    <p className="text-sm text-gray-600 dark:text-gray-400">
+                      {level === 1 ? 'I noticed you might be stuck' : `Topic: ${topic || 'General'}`}
+                    </p>
                   </div>
                 </div>
                 <button
@@ -51,16 +68,17 @@ export function AutoHelpPopup({ isOpen, onClose, message, onShowMore }: AutoHelp
                 </button>
               </div>
 
-              <p className="text-gray-700 dark:text-gray-300 mb-6 leading-relaxed">
-                {message}
-              </p>
+              <div className="text-gray-700 dark:text-gray-300 mb-6 leading-relaxed whitespace-pre-wrap max-h-[55vh] overflow-y-auto pr-2">
+                {text}
+                {extra ? <div className="mt-4">{extra}</div> : null}
+              </div>
 
               <div className="flex gap-3">
-                <Button variant="primary" onClick={onClose} className="flex-1">
-                  Got it
+                <Button variant="primary" onClick={onUnderstand || onClose} className="flex-1">
+                  I Understand
                 </Button>
                 {onShowMore && (
-                  <Button variant="secondary" onClick={onShowMore} className="flex-1">
+                  <Button variant="secondary" onClick={onShowMore} className="flex-1" disabled={Boolean(showMoreDisabled)}>
                     Show more
                   </Button>
                 )}
