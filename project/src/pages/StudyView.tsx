@@ -1,11 +1,12 @@
 import { motion } from 'framer-motion';
 import { AutoHelpPopup } from '../components/AutoHelpPopup';
 import { Upload, FileText } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { type ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { Document, Page, pdfjs } from 'react-pdf';
 import { renderAsync } from 'docx-preview';
 import { FaceTrackingPopup } from '../components/FaceTrackingPopup';
+import type { FaceTrackerSnapshot } from '../components/FaceTracker';
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   'pdfjs-dist/build/pdf.worker.min.mjs',
@@ -32,6 +33,16 @@ export function StudyView() {
   const pdfDocProxyRef = useRef<any | null>(null);
   const pdfDocLoadingRef = useRef<Promise<any> | null>(null);
   const pdfPageTopicCacheRef = useRef<Map<number, string>>(new Map());
+
+  // Live face snapshot (attention & emotion), forwarded from FaceTrackingPopup.
+  const faceSnapshotRef = useRef<FaceTrackerSnapshot | null>(null);
+
+  // Behavior features (scroll-derived)
+  const lastScrollAtMsRef = useRef<number>(Date.now());
+  const lastScrollTopRef = useRef<number>(0);
+  const lastScrollSpeedRef = useRef<number>(0);
+  const reReadCountSinceLastSendRef = useRef<number>(0);
+  const lastBehaviorSentAtMsRef = useRef<number>(0);
 
   const { setCurrentTopic, currentTopic, agentActive, cameraActive, user, guest } = useApp();
 
@@ -63,16 +74,18 @@ export function StudyView() {
     const rel = (fileUrl || contentDoc?.content?.fileUrl || '').toLowerCase();
     if (rel.endsWith('.pdf')) return 'pdf';
     if (rel.endsWith('.docx') || rel.endsWith('.doc')) return 'docx';
-    if (rel.endsWith('.pptx')) return 'pptx';
     return 'unknown';
   }, [contentDoc, fileUrl]);
 
   useEffect(() => {
     if (agentActive && hasDocument) {
-      const timer = setTimeout(() => {
+      const HELP_POPUP_INTERVAL_MS = 10000;
+
+      const intervalId = window.setInterval(() => {
         setShowHelp(true);
-      }, 5000);
-      return () => clearTimeout(timer);
+      }, HELP_POPUP_INTERVAL_MS);
+
+      return () => window.clearInterval(intervalId);
     }
   }, [setCurrentTopic, agentActive, hasDocument]);
 
@@ -137,6 +150,12 @@ export function StudyView() {
     pdfDocLoadingRef.current = null;
     pdfPageTopicCacheRef.current.clear();
     lastSentContextRef.current = null;
+
+    // Reset behavior features for new document
+    lastScrollAtMsRef.current = Date.now();
+    lastScrollTopRef.current = 0;
+    lastScrollSpeedRef.current = 0;
+    reReadCountSinceLastSendRef.current = 0;
   }, [absoluteFileUrl]);
 
   const getPdfDocProxy = useCallback(async () => {
@@ -314,6 +333,10 @@ export function StudyView() {
 
     if (!container) return;
 
+    // Initialize baselines for behavior features
+    lastScrollAtMsRef.current = Date.now();
+    lastScrollTopRef.current = container.scrollTop;
+
     const schedule = () => {
       if (pauseTimerRef.current !== null) window.clearTimeout(pauseTimerRef.current);
       pauseTimerRef.current = window.setTimeout(() => {
@@ -321,7 +344,25 @@ export function StudyView() {
       }, 3000);
     };
 
-    const onScroll = () => schedule();
+    const onScroll = () => {
+      const now = Date.now();
+      const y = container.scrollTop;
+
+      const prevY = lastScrollTopRef.current;
+      const prevAt = lastScrollAtMsRef.current;
+
+      const dy = y - prevY;
+      const dtSec = Math.max(0.001, (now - prevAt) / 1000);
+
+      // re-read == user scrolls upward
+      if (dy < 0) reReadCountSinceLastSendRef.current += 1;
+
+      lastScrollSpeedRef.current = Math.abs(dy) / dtSec;
+      lastScrollTopRef.current = y;
+      lastScrollAtMsRef.current = now;
+
+      schedule();
+    };
 
     container.addEventListener('scroll', onScroll, { passive: true });
     // Also schedule once on mount (user may start reading without scrolling)
@@ -335,6 +376,137 @@ export function StudyView() {
       }
     };
   }, [agentActive, absoluteFileUrl, fileType, handleReadingPause]);
+
+  // Stream behavior_vector to ML every ~5 seconds while studying.
+  useEffect(() => {
+    if (!agentActive) return;
+    if (!hasDocument) return;
+
+    const SEND_INTERVAL_MS = 5000;
+    const PAUSE_CAP_SEC = 60;
+    const SCROLL_SPEED_CAP_PX_PER_SEC = 2000;
+    const REREAD_CAP_COUNT = 10;
+    const COOLDOWN_MS = 5000;
+
+    let stopped = false;
+
+    const tick = async () => {
+      if (stopped) return;
+
+      // Cooldown guard (avoid accidental bursts due to effect restarts/tab visibility/etc.)
+      const nowMs = Date.now();
+      if (nowMs - lastBehaviorSentAtMsRef.current < COOLDOWN_MS) return;
+
+      const container = fileType === 'pdf'
+        ? pdfScrollContainerRef.current
+        : fileType === 'docx'
+          ? docxScrollContainerRef.current
+          : null;
+
+      if (!container) return;
+
+      const userId = await ensureUserId();
+      if (!userId) return;
+
+      const pauseTimeSec = Math.min(PAUSE_CAP_SEC, Math.max(0, (nowMs - lastScrollAtMsRef.current) / 1000));
+      const scrollSpeed = Math.min(
+        SCROLL_SPEED_CAP_PX_PER_SEC,
+        Math.max(0, lastScrollSpeedRef.current || 0)
+      );
+      const reReadCount = Math.min(
+        REREAD_CAP_COUNT,
+        Math.max(0, reReadCountSinceLastSendRef.current || 0)
+      );
+
+      const attentionFromFace = faceSnapshotRef.current?.attention_score;
+      const attentionScore = (() => {
+        const n = typeof attentionFromFace === 'number' ? attentionFromFace : Number(attentionFromFace);
+        // Neutral fallback when camera/face snapshot is unavailable
+        // 1.0 = fully attentive, 0.5 = unknown/neutral, 0.0 = not attentive
+        if (!Number.isFinite(n)) return 0.5;
+        return Math.max(0, Math.min(1, n));
+      })();
+
+      // Meaningful fatigue heuristic (0..1)
+      // - long pause => fatigue
+      // - very slow scroll => disengagement
+      // - low attention => fatigue
+      let fatigueScore = 0;
+      if (pauseTimeSec > 8) fatigueScore += 0.4;
+      if (scrollSpeed < 100) fatigueScore += 0.3;
+      if (attentionScore < 0.5) fatigueScore += 0.3;
+      fatigueScore = Math.max(0, Math.min(1, fatigueScore));
+
+      const behavior_vector = [
+        +pauseTimeSec.toFixed(3),
+        +scrollSpeed.toFixed(3),
+        reReadCount,
+        +attentionScore.toFixed(3),
+        +fatigueScore.toFixed(3),
+      ];
+
+      // Reset reRead count so it reflects recent behavior
+      reReadCountSinceLastSendRef.current = 0;
+
+      const payload = {
+        topic: (currentTopic || 'General'),
+        behavior_vector,
+        timestamp: Math.floor(nowMs / 1000),
+      };
+
+      if (import.meta.env.DEV) {
+        // eslint-disable-next-line no-console
+        console.log('Behavior Vector:', payload);
+      }
+
+      try {
+        // Server-authoritative confusion detection (backend does ML call + smoothing + CSV logging + DB write-on-true)
+        const mlRes = await fetch(`${API}/api/confusion/predict`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            userId,
+            agentActive: true,
+            topic: payload.topic,
+            behavior_vector: payload.behavior_vector,
+            timestamp: payload.timestamp,
+          }),
+        });
+
+        const mlJson = await mlRes.json().catch(() => null);
+        if (import.meta.env.DEV && !mlRes.ok) {
+          // eslint-disable-next-line no-console
+          console.warn(`[ml] Backend predict failed (${mlRes.status}). Response:`, mlJson);
+        }
+
+        // Confusion is detected ONLY through backend ML decision.
+        const isConfused = Boolean(mlJson && typeof mlJson === 'object' && (mlJson as any).confusion === true);
+        if (import.meta.env.DEV) {
+          // eslint-disable-next-line no-console
+          console.log('[ml] backend prediction:', mlJson, 'confusion=', isConfused);
+        }
+
+        lastBehaviorSentAtMsRef.current = nowMs;
+      } catch {
+        if (import.meta.env.DEV) {
+          // eslint-disable-next-line no-console
+          console.warn('[ml] Backend predict endpoint unreachable. Start backend or check VITE_API_URL.');
+        }
+        lastBehaviorSentAtMsRef.current = nowMs;
+      }
+    };
+
+    // fire once immediately, then interval
+    void tick();
+    const id = window.setInterval(() => {
+      void tick();
+    }, SEND_INTERVAL_MS);
+
+    return () => {
+      stopped = true;
+      window.clearInterval(id);
+    };
+  }, [API, agentActive, ensureUserId, fileType, hasDocument, currentTopic]);
 
   const openFilePicker = async () => {
     setUploadError(null);
@@ -425,20 +597,18 @@ export function StudyView() {
     const name = f.name.toLowerCase();
     if (name.endsWith('.pdf')) return true;
     if (name.endsWith('.docx') || name.endsWith('.doc')) return true;
-    if (name.endsWith('.pptx')) return true;
 
     const type = (f.type || '').toLowerCase();
     if (type.includes('pdf')) return true;
     if (type.includes('wordprocessingml') || type.includes('msword')) return true;
-    if (type.includes('presentationml') || type.includes('powerpoint')) return true;
     return false;
   };
 
-  const onFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const onFileChange = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     if (!isSupportedFile(file)) {
-      setUploadError('Please select a PDF (.pdf), Word (.docx/.doc), or PowerPoint (.pptx) file.');
+      setUploadError('Please select a PDF (.pdf) or Word (.docx/.doc) file.');
       e.target.value = '';
       return;
     }
@@ -486,7 +656,7 @@ export function StudyView() {
             <input
               ref={fileInputRef}
               type="file"
-              accept=".pdf,.docx,.doc,.pptx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.presentationml.presentation"
+              accept=".pdf,.docx,.doc,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
               className="hidden"
               onChange={onFileChange}
               disabled={uploading}
@@ -508,7 +678,7 @@ export function StudyView() {
                 {uploading ? 'Uploading…' : 'Upload Your Study Material'}
               </h3>
               <p className="text-gray-600 dark:text-gray-400 mb-6">
-                Upload a PDF, Word, or PPT to begin studying
+                Upload a PDF or Word document to begin studying
               </p>
               {!agentActive && !uploadError && (
                 <div className="text-sm text-gray-700 dark:text-gray-300 mb-4">
@@ -521,7 +691,7 @@ export function StudyView() {
                 </div>
               )}
               <div className="text-sm text-gray-500 dark:text-gray-500">
-                Supports PDF (.pdf), Word (.docx/.doc), PowerPoint (.pptx)
+                Supports PDF (.pdf), Word (.docx/.doc)
               </div>
             </motion.div>
           </motion.div>
@@ -560,7 +730,7 @@ export function StudyView() {
             >
               {absoluteFileUrl ? (
                 <div className="mb-8">
-                  <div className="mb-3">
+                  <div className="mb-3 flex items-center justify-between gap-2">
                     <a
                       href={absoluteFileUrl}
                       target="_blank"
@@ -569,6 +739,31 @@ export function StudyView() {
                     >
                       Open original file
                     </a>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowHelp(false);
+                        setHasDocument(false);
+                        setUploading(false);
+                        setUploadError(null);
+                        setUploadedTitle(null);
+                        setContentId(null);
+                        setContentDoc(null);
+                        setFileUrl(null);
+                        setNumPages(0);
+                        setZoom(1);
+
+                        // Reset behavior features
+                        lastScrollAtMsRef.current = Date.now();
+                        lastScrollTopRef.current = 0;
+                        lastScrollSpeedRef.current = 0;
+                        reReadCountSinceLastSendRef.current = 0;
+                      }}
+                      className="px-3 py-1 bg-gray-100 dark:bg-gray-800 rounded-md text-gray-800 dark:text-gray-200 text-sm"
+                      aria-label="Remove document"
+                    >
+                      Remove doc
+                    </button>
                   </div>
                   {fileType === 'pdf' && (
                     <div className="bg-white dark:bg-white/5 rounded-xl p-4">
@@ -639,14 +834,6 @@ export function StudyView() {
                     </div>
                   )}
 
-                  {fileType === 'pptx' && (
-                    <div className="bg-white dark:bg-white/5 rounded-xl p-4">
-                      <p className="text-gray-700 dark:text-gray-300">
-                        Preview not supported yet for PowerPoint (.pptx).
-                      </p>
-                    </div>
-                  )}
-
                   {fileType === 'unknown' && (
                     <div className="bg-white dark:bg-white/5 rounded-xl p-4">
                       <p className="text-gray-700 dark:text-gray-300">Preview not available.</p>
@@ -661,7 +848,12 @@ export function StudyView() {
         )}
       </div>
 
-      <FaceTrackingPopup enabled={agentActive && cameraActive} />
+      <FaceTrackingPopup
+        enabled={agentActive && cameraActive}
+        onSnapshot={(s) => {
+          faceSnapshotRef.current = s;
+        }}
+      />
 
       <AutoHelpPopup
         isOpen={showHelp}

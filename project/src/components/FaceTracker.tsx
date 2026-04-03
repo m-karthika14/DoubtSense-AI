@@ -6,7 +6,8 @@ import * as faceapi from 'face-api.js';
 
 export type FaceTrackerSnapshot = {
   present: boolean;
-  attention_score: 0 | 1;
+  // Continuous attention signal in range 0..1 (smoothed).
+  attention_score: number;
   emotion: string;
   emotion_score: number;
   timestamp: string;
@@ -40,6 +41,20 @@ function pickTopExpression(expressions: Record<string, number> | undefined | nul
   return { expression: entries[0][0], score: entries[0][1] };
 }
 
+function clamp01(value: unknown) {
+  const n = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(1, n));
+}
+
+function pushAndAverage(history: number[], current: number, maxLen: number) {
+  history.push(current);
+  while (history.length > maxLen) history.shift();
+  if (history.length === 0) return current;
+  const sum = history.reduce((a, b) => a + b, 0);
+  return sum / history.length;
+}
+
 export function FaceTracker({
   enabled,
   apiBaseUrl,
@@ -55,6 +70,8 @@ export function FaceTracker({
 
   const lastPresenceRef = useRef<boolean>(false);
   const lastEmotionRef = useRef<{ emotion: string; score: number }>({ emotion: 'neutral', score: 0 });
+  const lastDetectionScoreRef = useRef<number>(0);
+  const attentionHistoryRef = useRef<number[]>([]);
 
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [modelsReady, setModelsReady] = useState(false);
@@ -270,6 +287,7 @@ export function FaceTracker({
   const inferEmotion = useCallback(async () => {
     if (!modelsReady) {
       lastEmotionRef.current = { emotion: 'neutral', score: 0 };
+      lastDetectionScoreRef.current = 0;
       return;
     }
 
@@ -282,6 +300,9 @@ export function FaceTracker({
         .detectSingleFace(videoEl, options)
         .withFaceExpressions();
 
+      // detection confidence (0..1) from face-api
+      lastDetectionScoreRef.current = clamp01(detection?.detection?.score);
+
       const top = pickTopExpression(detection?.expressions as any);
       if (!top) {
         lastEmotionRef.current = { emotion: 'neutral', score: 0 };
@@ -293,6 +314,7 @@ export function FaceTracker({
       lastEmotionRef.current = { emotion: mapped, score: Math.max(0, Math.min(1, score)) };
     } catch {
       lastEmotionRef.current = { emotion: 'neutral', score: 0 };
+      lastDetectionScoreRef.current = 0;
     }
   }, [modelsReady]);
 
@@ -333,7 +355,16 @@ export function FaceTracker({
       await inferEmotion();
 
       const present = Boolean(lastPresenceRef.current);
-      const attention_score: 0 | 1 = present ? 1 : 0;
+
+      // Continuous attention: prefer face-api detection confidence when present.
+      // If face is not present, force attention to 0.
+      const rawAttention = present
+        ? (modelsReady ? clamp01(lastDetectionScoreRef.current) : 1)
+        : 0;
+
+      // Smooth with a short moving average to reduce jitter.
+      const attention_score = pushAndAverage(attentionHistoryRef.current, rawAttention, 5);
+
       const emotion = String(lastEmotionRef.current.emotion || 'neutral');
       const emotion_score = typeof lastEmotionRef.current.score === 'number' ? lastEmotionRef.current.score : 0;
 

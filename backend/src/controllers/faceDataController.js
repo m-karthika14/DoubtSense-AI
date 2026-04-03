@@ -26,8 +26,8 @@ async function postFaceData(req, res) {
     if (present === null) return res.status(400).json({ message: 'present must be a boolean' });
 
     const attention_score = parseNumber(req.body?.attention_score);
-    if (attention_score === null || (attention_score !== 0 && attention_score !== 1)) {
-      return res.status(400).json({ message: 'attention_score must be 0 or 1' });
+    if (attention_score === null || attention_score < 0 || attention_score > 1) {
+      return res.status(400).json({ message: 'attention_score must be a number between 0 and 1' });
     }
 
     const emotion = normalizeString(req.body?.emotion);

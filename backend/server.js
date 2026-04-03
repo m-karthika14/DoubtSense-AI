@@ -13,6 +13,8 @@ const contextRoutes = require('./src/routes/context');
 const agentRoutes = require('./src/routes/agent');
 const contentRoutes = require('./src/routes/content');
 const faceDataRoutes = require('./src/routes/faceData');
+const confusionRoutes = require('./src/routes/confusion');
+const behaviorVectorRoutes = require('./src/routes/behaviorVector');
 
 const app = express();
 app.use(cors());
@@ -31,6 +33,8 @@ app.use('/api', contextRoutes);
 app.use('/api', agentRoutes);
 app.use('/api', contentRoutes);
 app.use('/api', faceDataRoutes);
+app.use('/api', confusionRoutes);
+app.use('/api', behaviorVectorRoutes);
 
 const DEFAULT_PORT = 4000;
 const explicitPort = typeof process.env.PORT === 'string' && process.env.PORT.trim().length > 0;
@@ -50,7 +54,12 @@ process.on('unhandledRejection', (reason) => {
 (async function start() {
 	try {
 		console.log('[server] Starting up...');
-		await connectDB(process.env.MONGODB_URI);
+		if (typeof process.env.MONGODB_URI === 'string' && process.env.MONGODB_URI.trim().length > 0) {
+			await connectDB(process.env.MONGODB_URI);
+		} else {
+			console.warn('[db] MONGODB_URI is not set. Starting backend WITHOUT MongoDB.');
+			console.warn('[db] Confusion events will not be persisted until MongoDB is configured.');
+		}
 
 		let server;
 		let port = START_PORT;

@@ -5,9 +5,10 @@ import { FaceTracker, FaceTrackerSnapshot } from './FaceTracker';
 
 type Props = {
   enabled: boolean;
+  onSnapshot?: (snapshot: FaceTrackerSnapshot) => void;
 };
 
-export function FaceTrackingPopup({ enabled }: Props) {
+export function FaceTrackingPopup({ enabled, onSnapshot }: Props) {
   const { user, guest } = useApp();
   const [snapshot, setSnapshot] = useState<FaceTrackerSnapshot>({
     present: false,
@@ -61,14 +62,17 @@ export function FaceTrackingPopup({ enabled }: Props) {
 
         <div className="text-xs text-gray-700 dark:text-gray-300 mb-3 space-y-1">
           <div>Emotion: <span className="font-semibold">{snapshot.emotion}</span> ({snapshot.emotion_score.toFixed(2)})</div>
-          <div>Attention: <span className="font-semibold">{snapshot.attention_score}</span></div>
+          <div>Attention: <span className="font-semibold">{Number(snapshot.attention_score || 0).toFixed(2)}</span></div>
         </div>
 
         <FaceTracker
           enabled={enabled}
           apiBaseUrl={API}
           studentId={studentId}
-          onSnapshot={setSnapshot}
+          onSnapshot={(s) => {
+            setSnapshot(s);
+            onSnapshot?.(s);
+          }}
           sendIntervalMs={2000}
         />
 

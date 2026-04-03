@@ -3,9 +3,10 @@ const mongoose = require('mongoose');
 const FaceDataSchema = new mongoose.Schema(
   {
     present: { type: Boolean, required: true },
-    attention_score: { type: Number, required: true },
+    // Continuous 0..1
+    attention_score: { type: Number, required: true, min: 0, max: 1 },
     emotion: { type: String, required: true },
-    emotion_score: { type: Number, required: true },
+    emotion_score: { type: Number, required: true, min: 0, max: 1 },
   },
   { _id: false }
 );

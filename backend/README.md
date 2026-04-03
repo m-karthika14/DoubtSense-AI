@@ -28,6 +28,15 @@ API
 - POST /api/auth/login { email, password } -> { token, user }
 - GET /api/auth/me -> { user } (requires Authorization: Bearer <token>)
 
+- POST /api/behavior-vector/log
+	- Logs every received `behavior_vector` to the backend terminal (no DB writes)
+	- Body: { userId, agentActive: true, topic, behavior_vector, timestamp }
+
+- POST /api/confusion
+	- Stores a snapshot in MongoDB only when ML predicts confusion
+	- Confusion is detected client-side when the ML JSON response contains `confusion: true|1` or any `*confusion*` key with value `true|1`
+	- Body: { userId, agentActive: true, topic, behavior_vector, timestamp, prediction }
+
 - POST /api/upload (multipart/form-data)
 	- Fields: `userId` (string), `agentActive` ("true"), optional `sourceType`, optional `sourceUrl`, optional `title`
 	- File field name: `file`
@@ -35,3 +44,7 @@ API
 
 Notes
 - This backend is intentionally minimal. It uses `bcryptjs` for password hashing and `jsonwebtoken` for simple JWTs. For production, use HTTPS, proper secret management, input validation, rate limiting, and stronger security practices.
+
+Troubleshooting
+- If you see a port conflict on startup, either stop the process using that port or set `PORT` in `.env`.
+	- If you change `PORT`, also set the frontend `VITE_API_URL` to match.
