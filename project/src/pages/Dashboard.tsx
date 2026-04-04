@@ -6,7 +6,7 @@ import { Button } from '../components/Button';
 import { ConfidenceRing } from '../components/ConfidenceRing';
 import { ProgressGraph } from '../components/ProgressGraph';
 import { BookOpen, TrendingUp, Clock, Target } from 'lucide-react';
-import { useEffect } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useApp } from '../context/AppContext';
 
 const weakTopics = [
@@ -35,11 +35,69 @@ const behaviorMetrics = [
 
 export function Dashboard() {
   const navigate = useNavigate();
-  const { setCurrentTopic } = useApp();
+  const { currentTopic, setCurrentTopic, user, guest } = useApp();
+  const [activeTopic, setActiveTopic] = useState<string>('');
+
+  const API = useMemo(() => {
+    return (import.meta.env.VITE_API_URL as string) || 'http://localhost:4000';
+  }, []);
+
+  const ensureUserId = useCallback(async () => {
+    if (user?.userId) return user.userId;
+
+    try {
+      const raw = localStorage.getItem('doubtsense_user');
+      const parsed = raw ? (JSON.parse(raw) as { userId?: string }) : null;
+      if (parsed?.userId) return parsed.userId;
+    } catch {
+      // ignore
+    }
+
+    await guest();
+    try {
+      const raw = localStorage.getItem('doubtsense_user');
+      const parsed = raw ? (JSON.parse(raw) as { userId?: string }) : null;
+      return parsed?.userId;
+    } catch {
+      return undefined;
+    }
+  }, [guest, user?.userId]);
 
   useEffect(() => {
-    setCurrentTopic('Dashboard');
-  }, [setCurrentTopic]);
+    let cancelled = false;
+
+    (async () => {
+      const userId = await ensureUserId();
+      if (!userId) return;
+
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), 8000);
+
+      try {
+        const res = await fetch(`${API}/api/context?userId=${encodeURIComponent(userId)}`, {
+          signal: controller.signal,
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) return;
+        const topic = data?.context?.activeTopic;
+        if (typeof topic === 'string' && topic.trim()) {
+          const t = topic.trim();
+          if (!cancelled) {
+            setActiveTopic(t);
+            setCurrentTopic(t);
+          }
+        }
+      } catch {
+        // ignore
+      } finally {
+        window.clearTimeout(timeoutId);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [API, ensureUserId, setCurrentTopic]);
 
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gradient-to-br dark:from-slate-900 dark:to-indigo-950 pb-20">
@@ -57,6 +115,12 @@ export function Dashboard() {
           <p className="text-gray-600 dark:text-gray-400 mb-8">
             Here's your learning progress overview
           </p>
+          <div className="flex items-center gap-2 mb-8">
+            <div className="text-sm text-gray-600 dark:text-gray-400">Topic:</div>
+            <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-violet-100 dark:bg-violet-500/20 text-violet-800 dark:text-violet-200">
+              {activeTopic || currentTopic || 'General'}
+            </span>
+          </div>
         </motion.div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">

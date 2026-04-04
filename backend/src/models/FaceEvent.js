@@ -22,6 +22,9 @@ const FaceEventSchema = new mongoose.Schema(
   }
 );
 
+// TTL index: automatically expire events after a configurable interval (default 6 hours)
+const EVENT_TTL_SECONDS = Number(process.env.EVENT_TTL_SECONDS || 21600);
+FaceEventSchema.index({ timestamp: 1 }, { expireAfterSeconds: EVENT_TTL_SECONDS });
 FaceEventSchema.index({ student_id: 1, timestamp: -1 });
 
 module.exports = mongoose.model('FaceEvent', FaceEventSchema);

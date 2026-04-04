@@ -1,11 +1,29 @@
 import { motion } from 'framer-motion';
 import { Brain, Camera, User } from 'lucide-react';
 import { NavLink } from 'react-router-dom';
+import { useEffect, useRef, useState } from 'react';
 import { Toggle } from './Toggle';
 import { useApp } from '../context/AppContext';
 
 export function Navigation() {
-  const { agentActive, cameraActive, toggleAgent, toggleCamera } = useApp();
+  const { agentActive, cameraActive, toggleAgent, toggleCamera, user } = useApp();
+  const [profileOpen, setProfileOpen] = useState(false);
+  const profileRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!profileOpen) return;
+
+    const onPointerDown = (e: PointerEvent) => {
+      const target = e.target as Node | null;
+      if (!target) return;
+      if (profileRef.current && !profileRef.current.contains(target)) {
+        setProfileOpen(false);
+      }
+    };
+
+    window.addEventListener('pointerdown', onPointerDown);
+    return () => window.removeEventListener('pointerdown', onPointerDown);
+  }, [profileOpen]);
 
   return (
     <nav className="fixed top-6 left-1/2 -translate-x-1/2 z-50 w-[90%] max-w-4xl">
@@ -55,12 +73,47 @@ export function Navigation() {
             </div>
           </div>
 
-          <motion.div
-            whileHover={{ scale: 1.1 }}
-            className="w-10 h-10 rounded-full bg-gradient-to-br from-indigo-400 to-violet-400 flex items-center justify-center cursor-pointer"
-          >
-            <User className="w-5 h-5 text-white" />
-          </motion.div>
+          <div className="relative" ref={profileRef}>
+            <motion.button
+              type="button"
+              whileHover={{ scale: 1.1 }}
+              className="w-10 h-10 rounded-full bg-gradient-to-br from-indigo-400 to-violet-400 flex items-center justify-center cursor-pointer"
+              aria-label="Open profile"
+              aria-expanded={profileOpen}
+              onClick={() => setProfileOpen((v) => !v)}
+            >
+              <User className="w-5 h-5 text-white" />
+            </motion.button>
+
+            {profileOpen ? (
+              <div className="absolute top-12 right-0 z-50 w-72 rounded-2xl bg-white/95 dark:bg-slate-950/90 backdrop-blur-md border border-gray-200 dark:border-white/10 shadow-sm p-4">
+                <div className="text-sm font-semibold text-gray-900 dark:text-gray-100 mb-3">Profile</div>
+
+                <div className="space-y-3">
+                  <div>
+                    <div className="text-xs text-gray-600 dark:text-gray-400">Name</div>
+                    <div className="text-sm text-gray-900 dark:text-gray-100 break-all">
+                      {user?.name || (user?.userId ? '—' : 'Guest')}
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="text-xs text-gray-600 dark:text-gray-400">User ID</div>
+                    <div className="text-sm text-gray-900 dark:text-gray-100 break-all">
+                      {user?.userId || 'Guest'}
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="text-xs text-gray-600 dark:text-gray-400">Email</div>
+                    <div className="text-sm text-gray-900 dark:text-gray-100 break-all">
+                      {user?.email || '—'}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ) : null}
+          </div>
         </div>
       </div>
     </nav>

@@ -29,6 +29,24 @@ const AppContext = createContext<AppContextType | undefined>(undefined);
 
 const AGENT_ACTIVE_KEY = 'doubtsense_agentActive';
 
+function normalizeAuthUser(rawUser: unknown, token?: string): AppUser {
+  const src = (rawUser && typeof rawUser === 'object') ? (rawUser as Record<string, unknown>) : {};
+  const idValue = src.id;
+  const userIdValue = src.userId ?? idValue;
+
+  const id = typeof idValue === 'string' ? idValue : (idValue != null ? String(idValue) : undefined);
+  const userId = typeof userIdValue === 'string' ? userIdValue : (userIdValue != null ? String(userIdValue) : undefined);
+
+  return {
+    id,
+    userId,
+    email: typeof src.email === 'string' ? src.email : undefined,
+    name: typeof src.name === 'string' ? src.name : undefined,
+    isGuest: typeof src.isGuest === 'boolean' ? src.isGuest : undefined,
+    token,
+  };
+}
+
 export function AppProvider({ children }: { children: ReactNode }) {
   const [agentActive, setAgentActive] = useState(() => {
     try {
@@ -63,7 +81,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const API = (import.meta.env.VITE_API_URL as string) || 'http://localhost:4000';
 
   const syncAgentStatusToBackend = async (nextAgentActive: boolean) => {
-    const userId = user?.userId;
+    const userId = user?.userId || user?.id;
     if (!userId) return;
     try {
       await fetch(`${API}/api/agent/status`, {
@@ -86,15 +104,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (!res.ok) {
       throw new Error(data?.message || 'Registration failed');
     }
-    const token = data.token as string;
-    const u = data.user as AppUser;
-    u.token = token;
+    const token = typeof data?.token === 'string' ? data.token : undefined;
+    const u = normalizeAuthUser(data?.user, token);
     setUser(u);
     localStorage.setItem('doubtsense_user', JSON.stringify(u));
     void fetch(`${API}/api/agent/status`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId: u.userId, agentActive })
+        body: JSON.stringify({ userId: u.userId || u.id, agentActive })
     }).catch(() => {});
   };
 
@@ -120,15 +137,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (!res.ok) {
       throw new Error(data?.message || 'Login failed');
     }
-    const token = data.token as string;
-    const u = data.user as AppUser;
-    u.token = token;
+    const token = typeof data?.token === 'string' ? data.token : undefined;
+    const u = normalizeAuthUser(data?.user, token);
     setUser(u);
     localStorage.setItem('doubtsense_user', JSON.stringify(u));
     void fetch(`${API}/api/agent/status`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId: u.userId, agentActive })
+        body: JSON.stringify({ userId: u.userId || u.id, agentActive })
     }).catch(() => {});
   };
 
@@ -138,15 +154,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (!res.ok) {
       throw new Error(data?.message || 'Guest creation failed');
     }
-    const token = data.token as string;
-    const u = data.user as AppUser;
-    u.token = token;
+    const token = typeof data?.token === 'string' ? data.token : undefined;
+    const u = normalizeAuthUser(data?.user, token);
     setUser(u);
     localStorage.setItem('doubtsense_user', JSON.stringify(u));
     void fetch(`${API}/api/agent/status`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId: u.userId, agentActive })
+        body: JSON.stringify({ userId: u.userId || u.id, agentActive })
     }).catch(() => {});
   };
 

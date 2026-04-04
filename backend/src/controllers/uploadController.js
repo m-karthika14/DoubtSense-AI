@@ -3,7 +3,7 @@ const Context = require('../models/Context');
 const fs = require('fs');
 const { cleanText, splitIntoSections } = require('../utils/textProcessing');
 const { extractFromUploadedFile } = require('../utils/fileExtraction');
-const { detectTopic } = require('../utils/topicDetection');
+const { detectTopicSmart } = require('../utils/topicDetection');
 const { difficultyFromTextLength } = require('../utils/difficulty');
 
 function normalizeSourceType(sourceType) {
@@ -45,31 +45,55 @@ async function uploadPdf(req, res) {
     }
 
     let sections;
+    let rawTextForStorage = '';
     if (Array.isArray(extracted.sections)) {
       // PPTX: treat each slide as one section.
-      const MIN_PPTX_SECTION_LEN = 25;
+      const MIN_PPTX_SECTION_LEN = Number(process.env.UPLOAD_PPTX_MIN_CHARS || 1);
+      const effectiveMin = Number.isFinite(MIN_PPTX_SECTION_LEN) && MIN_PPTX_SECTION_LEN >= 0 ? MIN_PPTX_SECTION_LEN : 1;
+
+      // Store the raw extracted slide text (unmodified) for exact persistence.
+      rawTextForStorage = extracted.sections.map((t) => String(t || '')).join('\n\n');
+
       sections = extracted.sections
         .map((t) => cleanText(t))
-        .filter((t) => Boolean(t) && t.length >= MIN_PPTX_SECTION_LEN);
+        .filter((t) => Boolean(t) && t.length >= effectiveMin);
     } else {
       // PDF/DOCX: common pipeline.
+      // Store the raw extracted text (unmodified) for exact persistence.
+      rawTextForStorage = typeof extracted.rawText === 'string' ? extracted.rawText : String(extracted.rawText || '');
+
       const cleaned = cleanText(extracted.rawText);
       sections = splitIntoSections(cleaned);
     }
 
-    const MAX_SECTIONS = 200;
-    if (sections.length > MAX_SECTIONS) sections = sections.slice(0, MAX_SECTIONS);
+    // IMPORTANT: store everything by default.
+    // Truncation is only applied if UPLOAD_MAX_SECTIONS is explicitly set.
+    const explicitMax = typeof process.env.UPLOAD_MAX_SECTIONS === 'string' && process.env.UPLOAD_MAX_SECTIONS.trim().length > 0;
+    const configuredMax = explicitMax ? Number(process.env.UPLOAD_MAX_SECTIONS) : NaN;
+    const effectiveMaxSections = explicitMax && Number.isFinite(configuredMax) && configuredMax > 0 ? configuredMax : null;
+
+    const sectionsTotal = sections.length;
+    const wasTruncated = Boolean(effectiveMaxSections && sections.length > effectiveMaxSections);
+    if (wasTruncated) sections = sections.slice(0, effectiveMaxSections);
 
     if (sections.length === 0) {
       return res.status(400).json({ message: 'No readable text found in this file' });
     }
 
+    // Detect ONE topic label for the whole uploaded document.
+    // This is more stable than per-section keyword matching and avoids false positives
+    // (e.g., matching "graph" inside "photograph").
+    const firstCombined = sections.slice(0, Math.min(10, sections.length)).join('\n\n');
+    const detected = await detectTopicSmart(firstCombined, { fallbackTitle: title });
+    const docTopic = detected && typeof detected.topic === 'string' && detected.topic.trim()
+      ? detected.topic.trim()
+      : 'General';
+
     const contentMap = sections.map((sectionText, index) => {
-      const { topic } = detectTopic(sectionText);
       const difficulty = difficultyFromTextLength(sectionText);
       return {
         sectionId: `s${index + 1}`,
-        topic,
+        topic: docTopic,
         text: sectionText,
         difficulty,
       };
@@ -81,17 +105,22 @@ async function uploadPdf(req, res) {
       title,
       sourceUrl,
       fileUrl,
+      rawText: rawTextForStorage,
       contentMap,
+      fileType: extracted.fileType,
+      sectionsTotal,
+      wasTruncated,
     });
 
     const first = contentMap[0];
     const now = new Date();
+    const initialActiveTopic = docTopic;
 
     const context = await Context.findOneAndUpdate(
       { userId },
       {
         userId,
-        activeTopic: first ? first.topic : 'General',
+        activeTopic: initialActiveTopic,
         sourceType,
         contentId: contentDoc._id,
         sectionId: first ? first.sectionId : undefined,
@@ -108,7 +137,9 @@ async function uploadPdf(req, res) {
       contentId: contentDoc._id,
       fileUrl,
       contentMap,
+      sectionsTotal,
       sectionsStored: contentMap.length,
+      wasTruncated,
       context,
     });
   } catch (err) {

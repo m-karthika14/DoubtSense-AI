@@ -9,6 +9,41 @@ function setStatus(message) {
   if (el) el.textContent = message;
 }
 
+function normalizeUserId(input) {
+  const raw = String(input || '').trim().toLowerCase();
+  if (!raw) return '';
+
+  // Auto-fix common forms like:
+  // - "John 123" -> "john_123"
+  // - "john-123" -> "john_123"
+  // - "john__123" -> "john_123"
+  let cleaned = raw
+    .replace(/\s+/g, '_')
+    .replace(/-+/g, '_')
+    .replace(/_+/g, '_');
+
+  // If it's like "john123", split into "john_123".
+  const glued = cleaned.match(/^([a-z]+)(\d+)$/);
+  if (glued) cleaned = `${glued[1]}_${glued[2]}`;
+
+  // Keep only a-z, 0-9, and underscore (after lowercasing).
+  cleaned = cleaned.replace(/[^a-z0-9_]/g, '');
+
+  // Ensure exactly one underscore between name and numbers.
+  const parts = cleaned.split('_').filter(Boolean);
+  if (parts.length >= 2) {
+    const namePart = parts[0].replace(/[^a-z]/g, '');
+    const numberPart = parts.slice(1).join('').replace(/\D/g, '');
+    if (namePart && numberPart) return `${namePart}_${numberPart}`;
+  }
+
+  return cleaned;
+}
+
+function isValidUserId(userId) {
+  return /^[a-z]+_[0-9]+$/.test(String(userId || ''));
+}
+
 async function verifyAgentWithBackend(apiBase, userId) {
   if (!apiBase || !userId) return;
   try {
@@ -38,11 +73,19 @@ async function loadConfig() {
 
 async function saveConfig() {
   const apiBase = $('apiBase').value.trim() || DEFAULT_API_BASE;
-  const userId = $('userId').value.trim();
+  const userIdInput = $('userId').value;
+  const normalizedUserId = normalizeUserId(userIdInput);
   const importantContent = $('importantContent').checked;
 
-  await chrome.storage.sync.set({ apiBase, userId, importantContent });
+  if (!normalizedUserId || !isValidUserId(normalizedUserId)) {
+    setStatus('Invalid userid. Use: name_123');
+    return false;
+  }
+
+  $('userId').value = normalizedUserId;
+  await chrome.storage.sync.set({ apiBase, userId: normalizedUserId, importantContent });
   setStatus('Saved');
+  return true;
 }
 
 async function sendNow() {
@@ -95,7 +138,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   $('sendNow').addEventListener('click', async () => {
-    await saveConfig();
+    const ok = await saveConfig();
+    if (!ok) return;
     await sendNow();
   });
 });

@@ -1,12 +1,12 @@
 import { motion } from 'framer-motion';
-import { AutoHelpPopup } from '../components/AutoHelpPopup';
-import { Button } from '../components/Button';
 import { Upload, FileText } from 'lucide-react';
 import { type ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { Document, Page, pdfjs } from 'react-pdf';
 import { renderAsync } from 'docx-preview';
 import { FaceTrackingPopup } from '../components/FaceTrackingPopup';
+import { AutoHelpPopup } from '../components/AutoHelpPopup';
+import { Button } from '../components/Button';
 import type { FaceTrackerSnapshot } from '../components/FaceTracker';
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
@@ -44,6 +44,7 @@ export function StudyView() {
   const docxScrollContainerRef = useRef<HTMLDivElement | null>(null);
   const pauseTimerRef = useRef<number | null>(null);
   const lastSentContextRef = useRef<{ sectionId: string; topic: string } | null>(null);
+  const lastHelpShownAtMsRef = useRef<number>(0);
   const pdfDocProxyRef = useRef<any | null>(null);
   const pdfDocLoadingRef = useRef<Promise<any> | null>(null);
   const pdfPageTopicCacheRef = useRef<Map<number, string>>(new Map());
@@ -59,8 +60,6 @@ export function StudyView() {
   const lastBehaviorSentAtMsRef = useRef<number>(0);
 
   const { setCurrentTopic, currentTopic, agentActive, cameraActive, user, guest } = useApp();
-
-  const userId = user?.userId;
 
   const API = useMemo(() => {
     return (import.meta.env.VITE_API_URL as string) || 'http://localhost:4000';
@@ -93,19 +92,7 @@ export function StudyView() {
     return 'unknown';
   }, [contentDoc, fileUrl]);
 
-  useEffect(() => {
-    if (agentActive && hasDocument && userId) {
-      const HELP_POPUP_INTERVAL_MS = 10000;
-
-      const intervalId = window.setInterval(() => {
-        setShowHelp(true);
-      }, HELP_POPUP_INTERVAL_MS);
-
-      return () => window.clearInterval(intervalId);
-    }
-  }, [setCurrentTopic, agentActive, hasDocument, userId]);
-
-  // Initialize popup state when opened (no LLM call here).
+  // Initialize popup state when opened.
   useEffect(() => {
     if (!showHelp) return;
     setHelpLevel(1);
@@ -127,95 +114,6 @@ export function StudyView() {
     if (level === 2) return helpExplanations.level2;
     return helpExplanations.level3;
   }, [helpExplanations.level1, helpExplanations.level2, helpExplanations.level3]);
-
-  const fetchExplainIfNeeded = useCallback(async () => {
-    if (!userId) return;
-    if (helpLoaded || helpLoading) return;
-    setHelpLoading(true);
-    setHelpExplanations((prev) => ({ ...prev, level1: 'Loading explanation...' }));
-    try {
-      const resp = await fetch(`${API}/api/explain`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId, agentActive: true }),
-      });
-      const data = await resp.json().catch(() => ({}));
-      if (!resp.ok) throw new Error('Explain failed');
-
-      const topic = typeof data?.topic === 'string' && data.topic.trim() ? data.topic.trim() : helpTopic;
-      setHelpTopic(topic);
-      setHelpExplanations({
-        level1: typeof data?.level1 === 'string' ? data.level1 : '',
-        level2: typeof data?.level2 === 'string' ? data.level2 : '',
-        level3: typeof data?.level3 === 'string' ? data.level3 : '',
-      });
-      setHelpLoaded(true);
-    } catch {
-      setHelpExplanations({
-        level1: 'Sorry — I could not load an explanation right now.',
-        level2: 'Sorry — I could not load an explanation right now.',
-        level3: 'Sorry — I could not load an explanation right now.',
-      });
-      setHelpLoaded(true);
-    } finally {
-      setHelpLoading(false);
-    }
-  }, [API, helpLoaded, helpLoading, helpTopic, userId]);
-
-  const onHelpShowMore = useCallback(async () => {
-    if (!userId) return;
-    // METHOD 3 — CALL ONLY ON USER ACTION
-    // Only call /api/explain when the user requests more (moving from Level 1 -> Level 2).
-    if (helpLevel === 1 && !helpLoaded && !helpLoading) {
-      await fetchExplainIfNeeded();
-      setHelpLevel(2);
-      return;
-    }
-
-    setHelpLevel((prev) => (prev < 3 ? ((prev + 1) as 1 | 2 | 3) : 3));
-  }, [fetchExplainIfNeeded, helpLevel, helpLoaded, helpLoading, userId]);
-
-  const onHelpUnderstand = useCallback(async () => {
-    try {
-      if (!userId) return;
-      await fetch(`${API}/api/feedback`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId,
-          topic: helpTopic,
-          levelSeen: helpLevel,
-          understood: true,
-        }),
-      });
-    } catch {
-      // ignore
-    } finally {
-      setShowHelp(false);
-    }
-  }, [API, helpLevel, helpTopic, userId]);
-
-  const onHelpSubmitDoubt = useCallback(async () => {
-    if (!userId) return;
-    const question = helpDoubt.trim();
-    if (!question) return;
-    setHelpAnswerLoading(true);
-    setHelpAnswer('Thinking...');
-    try {
-      const resp = await fetch(`${API}/api/ask-doubt`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId, topic: helpTopic, question }),
-      });
-      const data = await resp.json().catch(() => ({}));
-      const answer = typeof data?.answer === 'string' ? data.answer : '';
-      setHelpAnswer(answer || 'No answer returned.');
-    } catch {
-      setHelpAnswer('Failed to get an answer.');
-    } finally {
-      setHelpAnswerLoading(false);
-    }
-  }, [API, helpDoubt, helpTopic, userId]);
 
   // Hydrate current context (if any) when user becomes available
   useEffect(() => {
@@ -264,6 +162,111 @@ export function StudyView() {
     }
   }, [guest, user?.userId]);
 
+  const fetchExplainIfNeeded = useCallback(async () => {
+    if (helpLoaded || helpLoading) return;
+
+    const userId = user?.userId || (await ensureUserId());
+    if (!userId) return;
+
+    setHelpLoading(true);
+    setHelpExplanations((prev) => ({ ...prev, level1: 'Loading explanation...' }));
+
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 25000);
+
+    try {
+      const resp = await fetch(`${API}/api/explain`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId, agentActive: true, mode: 'study' }),
+        signal: controller.signal,
+      });
+
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        const msg = typeof (data as any)?.error === 'string' ? (data as any).error : `Explain failed (${resp.status})`;
+        throw new Error(msg);
+      }
+
+      const topic = typeof data?.topic === 'string' && data.topic.trim() ? data.topic.trim() : helpTopic;
+      setHelpTopic(topic);
+      setHelpExplanations({
+        level1: typeof data?.level1 === 'string' ? data.level1 : '',
+        level2: typeof data?.level2 === 'string' ? data.level2 : '',
+        level3: typeof data?.level3 === 'string' ? data.level3 : '',
+      });
+      setHelpLoaded(true);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Explain failed';
+      setHelpExplanations({ level1: msg, level2: msg, level3: msg });
+      setHelpLoaded(false);
+    } finally {
+      window.clearTimeout(timeoutId);
+      setHelpLoading(false);
+    }
+  }, [API, currentTopic, ensureUserId, helpLoaded, helpLoading, helpTopic, user?.userId]);
+
+  // When the popup opens (only on confusion), load the real explanation immediately.
+  useEffect(() => {
+    if (!showHelp) return;
+    void fetchExplainIfNeeded();
+  }, [fetchExplainIfNeeded, showHelp]);
+
+  const onHelpShowMore = useCallback(async () => {
+    // Only call /api/explain when the user requests more (moving from Level 1 -> Level 2).
+    if (helpLevel === 1 && !helpLoaded && !helpLoading) {
+      await fetchExplainIfNeeded();
+      setHelpLevel(2);
+      return;
+    }
+
+    setHelpLevel((prev) => (prev < 3 ? ((prev + 1) as 1 | 2 | 3) : 3));
+  }, [fetchExplainIfNeeded, helpLevel, helpLoaded, helpLoading]);
+
+  const onHelpUnderstand = useCallback(async () => {
+    const userId = user?.userId;
+    try {
+      if (!userId) return;
+      await fetch(`${API}/api/feedback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId,
+          topic: helpTopic,
+          levelSeen: helpLevel,
+          understood: true,
+        }),
+      });
+    } catch {
+      // ignore
+    } finally {
+      setShowHelp(false);
+    }
+  }, [API, helpLevel, helpTopic, user?.userId]);
+
+  const onHelpSubmitDoubt = useCallback(async () => {
+    const userId = user?.userId;
+    if (!userId) return;
+    const question = helpDoubt.trim();
+    if (!question) return;
+    setHelpAnswerLoading(true);
+    setHelpAnswer('Thinking...');
+    try {
+      const resp = await fetch(`${API}/api/ask-doubt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId, mode: 'study', question }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      const answer = typeof data?.answer === 'string' ? data.answer : '';
+      setHelpAnswer(answer || 'No answer returned.');
+    } catch {
+      setHelpAnswer('Failed to get an answer.');
+    } finally {
+      setHelpAnswerLoading(false);
+    }
+  }, [API, helpDoubt, helpTopic, user?.userId]);
+
   const detectTopicClient = useCallback((rawText: string) => {
     const text = String(rawText || '').toLowerCase();
     if (text.includes('binary tree')) return 'Binary Trees';
@@ -271,6 +274,35 @@ export function StudyView() {
     if (text.includes('array')) return 'Arrays';
     return 'General';
   }, []);
+
+  const detectTopicServer = useCallback(async (rawText: string) => {
+    const text = String(rawText || '').trim();
+    if (!text) return 'General';
+
+    const userId = await ensureUserId();
+    if (!userId) return 'General';
+
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 7000);
+
+    try {
+      const resp = await fetch(`${API}/api/topic/detect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId, agentActive: true, text: text.slice(0, 1800) }),
+        signal: controller.signal,
+      });
+
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) return 'General';
+      const topic = typeof (data as any)?.topic === 'string' ? String((data as any).topic).trim() : '';
+      return topic || 'General';
+    } catch {
+      return 'General';
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
+  }, [API, ensureUserId]);
 
   useEffect(() => {
     // Reset per-document caches when the file changes
@@ -319,13 +351,16 @@ export function StudyView() {
             .join(' ')
         : '';
 
-      const topic = detectTopicClient(joined);
+      let topic = detectTopicClient(joined);
+      if (topic === 'General') {
+        topic = await detectTopicServer(joined);
+      }
       pdfPageTopicCacheRef.current.set(pageNumber, topic);
       return topic;
     } catch {
       return 'General';
     }
-  }, [detectTopicClient, getPdfDocProxy]);
+  }, [detectTopicClient, detectTopicServer, getPdfDocProxy]);
 
   const postInternalContext = useCallback(
     async ({ topic, sectionId }: { topic: string; sectionId: string }) => {
@@ -435,13 +470,17 @@ export function StudyView() {
 
       // Fallback: infer topic from current rendered text
       const raw = String(container.innerText || '').slice(0, 4000);
-      const topic = detectTopicClient(raw);
+      let topic = detectTopicClient(raw);
+      if (topic === 'General') {
+        topic = await detectTopicServer(raw);
+      }
       await postInternalContext({ topic, sectionId: 'docx' });
     }
   }, [
     absoluteFileUrl,
     agentActive,
     detectTopicClient,
+    detectTopicServer,
     fileType,
     findMostVisibleDataPage,
     findMostVisibleHeading,
@@ -515,6 +554,7 @@ export function StudyView() {
     const SCROLL_SPEED_CAP_PX_PER_SEC = 2000;
     const REREAD_CAP_COUNT = 10;
     const COOLDOWN_MS = 5000;
+    const HELP_POPUP_COOLDOWN_MS = 30_000;
 
     let stopped = false;
 
@@ -612,6 +652,15 @@ export function StudyView() {
         if (import.meta.env.DEV) {
           // eslint-disable-next-line no-console
           console.log('[ml] backend prediction:', mlJson, 'confusion=', isConfused);
+        }
+
+        if (isConfused) {
+          const lastShown = lastHelpShownAtMsRef.current || 0;
+          if (nowMs - lastShown >= HELP_POPUP_COOLDOWN_MS) {
+            lastHelpShownAtMsRef.current = nowMs;
+            setHelpTopic(payload.topic);
+            setShowHelp(true);
+          }
         }
 
         lastBehaviorSentAtMsRef.current = nowMs;
@@ -977,7 +1026,7 @@ export function StudyView() {
       </div>
 
       <FaceTrackingPopup
-        enabled={agentActive && cameraActive}
+        enabled={cameraActive}
         onSnapshot={(s) => {
           faceSnapshotRef.current = s;
         }}
@@ -991,7 +1040,7 @@ export function StudyView() {
         text={getHelpTextForLevel(helpLevel)}
         onUnderstand={onHelpUnderstand}
         onShowMore={helpLevel < 3 ? onHelpShowMore : undefined}
-        showMoreDisabled={helpLoading || !userId}
+        showMoreDisabled={helpLoading}
         extra={
           helpLevel === 3 ? (
             <div className="space-y-2">

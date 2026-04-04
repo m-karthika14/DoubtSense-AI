@@ -1,5 +1,3 @@
-const FaceEvent = require('../models/FaceEvent');
-
 function normalizeString(value) {
   if (typeof value !== 'string') return '';
   return value.trim();
@@ -45,18 +43,20 @@ async function postFaceData(req, res) {
       return res.status(400).json({ message: 'timestamp must be a valid date' });
     }
 
-    const created = await FaceEvent.create({
-      student_id,
-      timestamp,
-      face_data: {
-        present,
-        attention_score,
-        emotion,
-        emotion_score,
+    // Privacy mode: accept face telemetry but do not persist it.
+    return res.status(202).json({
+      accepted: true,
+      event: {
+        student_id,
+        timestamp,
+        face_data: {
+          present,
+          attention_score,
+          emotion,
+          emotion_score,
+        },
       },
     });
-
-    return res.status(201).json({ event: created });
   } catch (err) {
     console.error('[face-data] post error', err);
     return res.status(500).json({ message: 'Server error' });
@@ -72,11 +72,8 @@ async function getLatestFaceData(req, res) {
     const limitNum = limitRaw ? Number(limitRaw) : 20;
     const limit = Number.isFinite(limitNum) ? Math.min(Math.max(1, Math.floor(limitNum)), 200) : 20;
 
-    const events = await FaceEvent.find({ student_id })
-      .sort({ timestamp: -1 })
-      .limit(limit);
-
-    return res.json({ events });
+    // Privacy mode: endpoint retained for compatibility, but storage is disabled.
+    return res.json({ events: [] });
   } catch (err) {
     console.error('[face-data] get error', err);
     return res.status(500).json({ message: 'Server error' });

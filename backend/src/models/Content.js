@@ -25,7 +25,14 @@ const ContentSchema = new mongoose.Schema({
   title: { type: String, required: true, trim: true },
   sourceUrl: { type: String },
   fileUrl: { type: String },
+  // Full extracted text (best-effort) for later matching/grounding.
+  // For PPTX we store the joined slide text.
+  rawText: { type: String },
   contentMap: { type: [ContentSectionSchema], default: [] },
+  // Upload stats for debugging and quality checks.
+  fileType: { type: String },
+  sectionsTotal: { type: Number },
+  wasTruncated: { type: Boolean },
   createdAt: { type: Date, default: Date.now },
 });
 

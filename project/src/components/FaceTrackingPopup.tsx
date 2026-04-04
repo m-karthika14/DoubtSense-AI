@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
 import { useApp } from '../context/AppContext';
 import { FaceTracker, FaceTrackerSnapshot } from './FaceTracker';
@@ -22,9 +22,21 @@ export function FaceTrackingPopup({ enabled, onSnapshot }: Props) {
     return (import.meta.env.VITE_API_URL as string) || 'http://localhost:4000';
   }, []);
 
+  const studentId = useMemo(() => {
+    const raw = user?.userId || user?.id;
+    if (!raw) return undefined;
+    const value = typeof raw === 'string' ? raw : String(raw);
+    return value.trim() || undefined;
+  }, [user?.id, user?.userId]);
+
+  const handleSnapshot = useCallback((s: FaceTrackerSnapshot) => {
+    setSnapshot(s);
+    onSnapshot?.(s);
+  }, [onSnapshot]);
+
   useEffect(() => {
     if (!enabled) return;
-    if (user?.userId) return;
+    if (studentId) return;
 
     // Ensure a student id exists (guest user) so the backend can store events.
     let cancelled = false;
@@ -40,9 +52,7 @@ export function FaceTrackingPopup({ enabled, onSnapshot }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [enabled, guest, user?.userId]);
-
-  const studentId = user?.userId;
+  }, [enabled, guest, studentId]);
 
   if (!enabled) return null;
 
@@ -69,10 +79,7 @@ export function FaceTrackingPopup({ enabled, onSnapshot }: Props) {
           enabled={enabled}
           apiBaseUrl={API}
           studentId={studentId}
-          onSnapshot={(s) => {
-            setSnapshot(s);
-            onSnapshot?.(s);
-          }}
+          onSnapshot={handleSnapshot}
           sendIntervalMs={2000}
         />
 

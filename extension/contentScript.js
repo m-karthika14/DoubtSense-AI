@@ -211,7 +211,12 @@ function renderHelpPopup() {
           renderHelpPopup();
 
           try {
-            const resp = await postJson(`${currentApiBase}/api/explain`, { userId: currentUserId, agentActive: true });
+            const resp = await postJson(`${currentApiBase}/api/explain`, {
+              userId: currentUserId,
+              agentActive: true,
+              mode: 'web',
+              source: 'extension',
+            });
             if (!resp.ok) throw new Error('Explain failed');
 
             const data = resp.data && typeof resp.data === 'object' ? resp.data : {};
@@ -255,7 +260,8 @@ function renderHelpPopup() {
         try {
           const resp = await postJson(`${currentApiBase}/api/ask-doubt`, {
             userId: currentUserId,
-            topic: currentTopic,
+            mode: 'web',
+            source: 'extension',
             question,
           });
           const answer = resp && resp.data && typeof resp.data.answer === 'string' ? resp.data.answer : '';
@@ -339,6 +345,18 @@ function extractParagraph() {
   return bodyText.slice(0, 1200);
 }
 
+function isDoubtSenseWebAppPage() {
+  // The DoubtSense webapp already posts INTERNAL context via POST /api/context with {topic, sectionId}.
+  // If the extension also posts WEBSITE context, it can overwrite the active topic back to "General".
+  try {
+    const hasAgentKey = localStorage.getItem(APP_AGENT_KEY) !== null;
+    const hasUserKey = localStorage.getItem('doubtsense_user') !== null;
+    return hasAgentKey || hasUserKey;
+  } catch {
+    return false;
+  }
+}
+
 async function postJson(url, body) {
   const res = await fetch(url, {
     method: 'POST',
@@ -365,6 +383,7 @@ async function sendWebsiteContext({ apiBase, userId, importantContent }) {
   const payload = {
     userId,
     agentActive: true,
+    source: 'extension',
     title: document.title || '',
     headings: extractHeadings(),
     paragraph: extractParagraph(),
@@ -581,6 +600,10 @@ async function sendNow(configOverride) {
 
   if (!userId) return { ok: false, error: 'Missing userId' };
   if (!effectiveAgentActive) return { ok: true, skipped: true, reason: 'Agent is OFF' };
+
+  if (isDoubtSenseWebAppPage()) {
+    return { ok: true, skipped: true, reason: 'DoubtSense webapp posts internal context' };
+  }
 
   try {
     if (isPdfUrl(location.href)) {

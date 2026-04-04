@@ -6,6 +6,7 @@ console.log('[server.js] Booting DoubtSense backend (server.js entry)');
 
 const express = require('express');
 const cors = require('cors');
+const mongoose = require('mongoose');
 const connectDB = require('./src/config/db');
 const authRoutes = require('./src/routes/auth');
 const uploadRoutes = require('./src/routes/upload');
@@ -17,6 +18,8 @@ const confusionRoutes = require('./src/routes/confusion');
 const behaviorVectorRoutes = require('./src/routes/behaviorVector');
 const explainRoutes = require('./src/routes/explain');
 const feedbackRoutes = require('./src/routes/feedback');
+const topicRoutes = require('./src/routes/topic');
+const webContextRoutes = require('./src/routes/webContext');
 
 const app = express();
 app.use(cors());
@@ -39,6 +42,8 @@ app.use('/api', confusionRoutes);
 app.use('/api', behaviorVectorRoutes);
 app.use('/api', explainRoutes);
 app.use('/api', feedbackRoutes);
+app.use('/api', topicRoutes);
+app.use('/api', webContextRoutes);
 
 const DEFAULT_PORT = 4000;
 const explicitPort = typeof process.env.PORT === 'string' && process.env.PORT.trim().length > 0;
@@ -91,17 +96,42 @@ process.on('unhandledRejection', (reason) => {
 			}
 		}
 
-		// graceful shutdown
-		const shutdown = () => {
-			console.log('[server] Shutting down...');
-			server.close(() => {
-				console.log('[server] HTTP server closed');
+		// graceful shutdown (idempotent)
+		let isShuttingDown = false;
+		const shutdown = async (signal) => {
+			if (isShuttingDown) return;
+			isShuttingDown = true;
+			console.log('[server] Shutting down...', signal ? `(signal=${signal})` : '');
+
+			// Force exit if something keeps the event loop alive
+			const hardTimeout = setTimeout(() => {
+				console.warn('[server] Force exiting after shutdown timeout');
 				process.exit(0);
-			});
+			}, 4000);
+			hardTimeout.unref?.();
+
+			try {
+				await new Promise((resolve) => server.close(resolve));
+				console.log('[server] HTTP server closed');
+			} catch (e) {
+				console.error('[server] Error closing HTTP server', e);
+			}
+
+			try {
+				if (mongoose.connection && mongoose.connection.readyState === 1) {
+					await mongoose.connection.close(false);
+					console.log('[db] Mongoose disconnected');
+				}
+			} catch (e) {
+				console.error('[db] Error closing mongoose connection', e);
+			}
+
+			clearTimeout(hardTimeout);
+			process.exit(0);
 		};
 
-		process.on('SIGINT', shutdown);
-		process.on('SIGTERM', shutdown);
+		process.on('SIGINT', () => void shutdown('SIGINT'));
+		process.on('SIGTERM', () => void shutdown('SIGTERM'));
 	} catch (err) {
 		console.error('[server] Failed to start', err && err.message ? err.message : err);
 		process.exit(1);

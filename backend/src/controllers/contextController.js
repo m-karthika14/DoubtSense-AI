@@ -1,5 +1,6 @@
 const Content = require('../models/Content');
 const Context = require('../models/Context');
+const WebContextEvent = require('../models/WebContextEvent');
 const { detectTopic } = require('../utils/topicDetection');
 const { cleanText } = require('../utils/textProcessing');
 const { difficultyFromTextLength } = require('../utils/difficulty');
@@ -73,6 +74,27 @@ async function postContext(req, res) {
 
     const importantContent = req.body.importantContent === true;
 
+    // Shadow-copy for reference (should not affect the primary Context behavior).
+    const MAX_PARAGRAPH_CHARS = 2000;
+    const boundedParagraph = paragraph.length > MAX_PARAGRAPH_CHARS ? paragraph.slice(0, MAX_PARAGRAPH_CHARS) : paragraph;
+    const source = req.body && req.body.source === 'extension' ? 'extension' : 'website';
+
+    try {
+      await WebContextEvent.create({
+        userId,
+        topic,
+        title: title || '',
+        url,
+        headings,
+        paragraph: boundedParagraph,
+        importantContent,
+        source,
+      });
+    } catch (e) {
+      // Non-fatal: still allow Context update path to continue.
+      console.warn('[context] Failed to persist WebContextEvent');
+    }
+
     let contentId;
     if (importantContent) {
       const difficulty = difficultyFromTextLength(combinedText);
@@ -91,6 +113,15 @@ async function postContext(req, res) {
         ],
       });
       contentId = contentDoc._id;
+    }
+
+    // Keep study context stable: if the user is currently in an upload/internal session,
+    // don't overwrite it with website browsing context. (Web browsing is stored in WebContextEvent.)
+    const existing = await Context.findOne({ userId }).lean();
+    const shouldUpdatePrimaryContext = !existing || existing.sourceType === 'website';
+
+    if (!shouldUpdatePrimaryContext) {
+      return res.json({ context: existing, contentId });
     }
 
     const context = await Context.findOneAndUpdate(

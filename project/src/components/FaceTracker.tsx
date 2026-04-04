@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { FaceMesh, FACEMESH_TESSELATION, FACEMESH_FACE_OVAL, FACEMESH_LIPS } from '@mediapipe/face_mesh';
-import { Camera } from '@mediapipe/camera_utils';
 import { drawConnectors, drawLandmarks } from '@mediapipe/drawing_utils';
 import * as faceapi from 'face-api.js';
 
@@ -55,6 +54,41 @@ function pushAndAverage(history: number[], current: number, maxLen: number) {
   return sum / history.length;
 }
 
+function waitForLoadedMetadata(videoEl: HTMLVideoElement, timeoutMs: number) {
+  if (videoEl.readyState >= 1) return Promise.resolve();
+
+  return new Promise<void>((resolve, reject) => {
+    let done = false;
+    const onLoaded = () => {
+      if (done) return;
+      done = true;
+      cleanup();
+      resolve();
+    };
+    const onError = () => {
+      if (done) return;
+      done = true;
+      cleanup();
+      reject(new Error('Video element failed to load camera metadata'));
+    };
+    const timeoutId = window.setTimeout(() => {
+      if (done) return;
+      done = true;
+      cleanup();
+      reject(new Error('Timed out waiting for camera video metadata'));
+    }, timeoutMs);
+
+    const cleanup = () => {
+      window.clearTimeout(timeoutId);
+      videoEl.removeEventListener('loadedmetadata', onLoaded);
+      videoEl.removeEventListener('error', onError);
+    };
+
+    videoEl.addEventListener('loadedmetadata', onLoaded);
+    videoEl.addEventListener('error', onError);
+  });
+}
+
 export function FaceTracker({
   enabled,
   apiBaseUrl,
@@ -65,17 +99,27 @@ export function FaceTracker({
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const cameraRef = useRef<any | null>(null);
   const faceMeshRef = useRef<any | null>(null);
 
   const lastPresenceRef = useRef<boolean>(false);
   const lastEmotionRef = useRef<{ emotion: string; score: number }>({ emotion: 'neutral', score: 0 });
   const lastDetectionScoreRef = useRef<number>(0);
   const attentionHistoryRef = useRef<number[]>([]);
+  const lastEmotionInferAtMsRef = useRef<number>(0);
+  const startInProgressRef = useRef<boolean>(false);
+  const lastOverlayDrawAtMsRef = useRef<number>(0);
+  const meshInFlightRef = useRef<boolean>(false);
+  const meshDisabledRef = useRef<boolean>(false);
+  const meshErrorCountRef = useRef<number>(0);
 
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [modelsReady, setModelsReady] = useState(false);
   const [isVisible, setIsVisible] = useState(() => document.visibilityState === 'visible');
+  const onSnapshotRef = useRef<Props['onSnapshot']>(onSnapshot);
+
+  useEffect(() => {
+    onSnapshotRef.current = onSnapshot;
+  }, [onSnapshot]);
 
   const canRun = enabled && isVisible;
 
@@ -94,7 +138,6 @@ export function FaceTracker({
     if (canvasEl.width !== vw) canvasEl.width = vw;
     if (canvasEl.height !== vh) canvasEl.height = vh;
 
-    // Ensure overlay matches the rendered video size
     const cw = videoEl.clientWidth;
     const ch = videoEl.clientHeight;
     if (cw && ch) {
@@ -105,15 +148,6 @@ export function FaceTracker({
 
   // Stop camera tracks + processing
   const stopAll = useCallback(() => {
-    try {
-      if (cameraRef.current && typeof cameraRef.current.stop === 'function') {
-        cameraRef.current.stop();
-      }
-    } catch {
-      // ignore
-    }
-    cameraRef.current = null;
-
     try {
       if (faceMeshRef.current && typeof faceMeshRef.current.close === 'function') {
         faceMeshRef.current.close();
@@ -135,6 +169,11 @@ export function FaceTracker({
     }
     streamRef.current = null;
 
+    const videoEl = videoRef.current;
+    if (videoEl) {
+      videoEl.srcObject = null;
+    }
+
     const canvasEl = canvasRef.current;
     if (canvasEl) {
       const ctx = canvasEl.getContext('2d');
@@ -143,6 +182,10 @@ export function FaceTracker({
 
     lastPresenceRef.current = false;
     lastEmotionRef.current = { emotion: 'neutral', score: 0 };
+    lastDetectionScoreRef.current = 0;
+    meshInFlightRef.current = false;
+    meshDisabledRef.current = false;
+    meshErrorCountRef.current = 0;
   }, []);
 
   useEffect(() => {
@@ -179,12 +222,17 @@ export function FaceTracker({
     };
   }, [fallbackModelsBaseUrl, localModelsBaseUrl]);
 
-  // Start MediaPipe FaceMesh when enabled & visible.
+  // Start webcam stream when enabled & visible.
   useEffect(() => {
     if (!canRun) {
+      startInProgressRef.current = false;
       stopAll();
       return;
     }
+
+    // Guard against duplicate startup loops in fast toggles / StrictMode remounts.
+    if (startInProgressRef.current) return;
+    startInProgressRef.current = true;
 
     let cancelled = false;
 
@@ -192,11 +240,22 @@ export function FaceTracker({
       setCameraError(null);
 
       const videoEl = videoRef.current;
-      const canvasEl = canvasRef.current;
-      if (!videoEl || !canvasEl) return;
+      if (!videoEl) return;
 
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
+          throw new Error('Camera is not supported in this browser/context');
+        }
+
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            width: { ideal: 320, max: 640 },
+            height: { ideal: 240, max: 480 },
+            frameRate: { ideal: 12, max: 15 },
+            facingMode: 'user',
+          },
+          audio: false,
+        });
         if (cancelled) {
           for (const track of stream.getTracks()) track.stop();
           return;
@@ -204,16 +263,15 @@ export function FaceTracker({
         streamRef.current = stream;
         videoEl.srcObject = stream;
 
-        await new Promise<void>((resolve) => {
-          const onLoaded = () => {
-            videoEl.removeEventListener('loadedmetadata', onLoaded);
-            resolve();
-          };
-          videoEl.addEventListener('loadedmetadata', onLoaded);
-        });
+        await waitForLoadedMetadata(videoEl, 5000);
 
-        await videoEl.play().catch(() => {});
-        syncCanvasSize();
+        try {
+          await videoEl.play();
+        } catch (e) {
+          // Common on some browsers if play is blocked; surface the error instead of hanging silently.
+          const msg = e instanceof Error ? e.message : 'Unable to start camera video playback';
+          throw new Error(msg);
+        }
 
         const faceMesh = new FaceMesh({
           locateFile: (file: string) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`,
@@ -221,14 +279,20 @@ export function FaceTracker({
 
         faceMesh.setOptions({
           maxNumFaces: 1,
-          refineLandmarks: true,
+          refineLandmarks: false,
           minDetectionConfidence: 0.5,
           minTrackingConfidence: 0.5,
         });
 
         faceMesh.onResults((results: any) => {
-          const ctx = canvasEl.getContext('2d');
-          if (!ctx) return;
+          const canvasEl = canvasRef.current;
+          const ctx = canvasEl?.getContext('2d');
+          if (!canvasEl || !ctx) return;
+
+          const now = Date.now();
+          const OVERLAY_DRAW_INTERVAL_MS = 150;
+          if (now - lastOverlayDrawAtMsRef.current < OVERLAY_DRAW_INTERVAL_MS) return;
+          lastOverlayDrawAtMsRef.current = now;
 
           syncCanvasSize();
           ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
@@ -247,36 +311,68 @@ export function FaceTracker({
         });
 
         faceMeshRef.current = faceMesh;
-
-        const cam = new Camera(videoEl, {
-          onFrame: async () => {
-            if (!faceMeshRef.current) return;
-            try {
-              await faceMeshRef.current.send({ image: videoEl });
-            } catch {
-              // ignore frame errors
-            }
-          },
-          width: 640,
-          height: 480,
-        });
-
-        cameraRef.current = cam;
-        await cam.start();
+        syncCanvasSize();
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Unable to access camera';
         setCameraError(msg);
         stopAll();
+      } finally {
+        startInProgressRef.current = false;
       }
     })();
 
     return () => {
       cancelled = true;
+      startInProgressRef.current = false;
       stopAll();
     };
   }, [canRun, stopAll, syncCanvasSize]);
 
-  // Keep canvas sizing in sync with layout changes.
+  // Run FaceMesh processing loop at a safe low frequency.
+  useEffect(() => {
+    if (!canRun) return;
+    if (meshDisabledRef.current) return;
+
+    const videoEl = videoRef.current;
+    const faceMesh = faceMeshRef.current;
+    if (!videoEl || !faceMesh) return;
+
+    let stopped = false;
+    let timer: number | null = null;
+
+    const tick = async () => {
+      if (stopped) return;
+      if (meshInFlightRef.current) return;
+      if (!faceMeshRef.current || !videoRef.current || !streamRef.current) return;
+
+      meshInFlightRef.current = true;
+      try {
+        await faceMeshRef.current.send({ image: videoRef.current });
+        meshErrorCountRef.current = 0;
+      } catch {
+        meshErrorCountRef.current += 1;
+        if (meshErrorCountRef.current >= 6) {
+          meshDisabledRef.current = true;
+          const canvasEl = canvasRef.current;
+          const ctx = canvasEl?.getContext('2d');
+          if (canvasEl && ctx) ctx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+        }
+      } finally {
+        meshInFlightRef.current = false;
+      }
+    };
+
+    timer = window.setInterval(() => {
+      void tick();
+    }, 250);
+
+    return () => {
+      stopped = true;
+      if (timer !== null) window.clearInterval(timer);
+      meshInFlightRef.current = false;
+    };
+  }, [canRun]);
+
   useEffect(() => {
     if (!enabled) return;
     const onResize = () => syncCanvasSize();
@@ -294,11 +390,20 @@ export function FaceTracker({
     const videoEl = videoRef.current;
     if (!videoEl) return;
 
+    // Emotion inference is expensive; cap its frequency to keep the UI responsive.
+    const nowMs = Date.now();
+    const EMOTION_MIN_INTERVAL_MS = 4000;
+    if (nowMs - (lastEmotionInferAtMsRef.current || 0) < EMOTION_MIN_INTERVAL_MS) return;
+    lastEmotionInferAtMsRef.current = nowMs;
+
     try {
-      const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.4 });
+      const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 128, scoreThreshold: 0.4 });
       const detection = await faceapi
         .detectSingleFace(videoEl, options)
         .withFaceExpressions();
+
+      const present = Boolean(detection?.detection);
+      lastPresenceRef.current = present;
 
       // detection confidence (0..1) from face-api
       lastDetectionScoreRef.current = clamp01(detection?.detection?.score);
@@ -313,6 +418,7 @@ export function FaceTracker({
       const score = typeof top.score === 'number' && Number.isFinite(top.score) ? top.score : 0;
       lastEmotionRef.current = { emotion: mapped, score: Math.max(0, Math.min(1, score)) };
     } catch {
+      lastPresenceRef.current = false;
       lastEmotionRef.current = { emotion: 'neutral', score: 0 };
       lastDetectionScoreRef.current = 0;
     }
@@ -376,7 +482,7 @@ export function FaceTracker({
         timestamp: new Date().toISOString(),
       };
 
-      onSnapshot?.(snapshot);
+      onSnapshotRef.current?.(snapshot);
       void sendSnapshot(snapshot);
     };
 
@@ -390,7 +496,7 @@ export function FaceTracker({
       stopped = true;
       if (timer !== null) window.clearInterval(timer);
     };
-  }, [canRun, inferEmotion, onSnapshot, sendIntervalMs, sendSnapshot]);
+  }, [canRun, inferEmotion, sendIntervalMs, sendSnapshot]);
 
   return (
     <div className="relative">
