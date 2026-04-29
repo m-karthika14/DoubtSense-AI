@@ -32,6 +32,7 @@ FEATURE_COLUMNS = [
 class Dataset:
     X: np.ndarray  # shape: (n_samples, 5)
     y: np.ndarray  # shape: (n_samples,)
+    user_ids: np.ndarray  # shape: (n_samples,)
 
 
 def _require_columns(fieldnames: Iterable[str] | None) -> None:
@@ -55,6 +56,7 @@ def load_labeled_dataset(csv_path: str | Path) -> Dataset:
 
     X_rows: List[List[float]] = []
     y_rows: List[int] = []
+    user_ids: List[str] = []
 
     with path.open("r", newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -80,17 +82,19 @@ def load_labeled_dataset(csv_path: str | Path) -> Dataset:
 
             X_rows.append(features)
             y_rows.append(y)
+            user_ids.append((row.get("userId") or "").strip())
 
     if not X_rows:
         raise ValueError("Dataset is empty (no rows)")
 
     X = np.asarray(X_rows, dtype=np.float64)
     y = np.asarray(y_rows, dtype=np.int64)
+    g = np.asarray(user_ids, dtype=np.str_)
 
     if X.ndim != 2 or X.shape[1] != 5:
         raise ValueError(f"Unexpected feature shape: {X.shape}")
 
-    return Dataset(X=X, y=y)
+    return Dataset(X=X, y=y, user_ids=g)
 
 
 def ensure_dir(path: str | Path) -> Path:

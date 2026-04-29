@@ -17,6 +17,8 @@ function normalizeHeadings(headings) {
     .slice(0, 50); // keep payload bounded
 }
 
+const INTERNAL_CONTEXT_MAX_PARAGRAPH_CHARS = 2000;
+
 async function postContext(req, res) {
   try {
     const userId = String(req.body.userId || '').trim();
@@ -29,6 +31,7 @@ async function postContext(req, res) {
       const topic = String(req.body.topic).trim();
       const sectionId = isNonEmptyString(req.body.sectionId) ? String(req.body.sectionId).trim() : undefined;
       const incomingContentId = isNonEmptyString(req.body.contentId) ? String(req.body.contentId).trim() : undefined;
+      const incomingParagraph = isNonEmptyString(req.body.paragraph) ? String(req.body.paragraph) : '';
 
       if (!sectionId) {
         return res.status(400).json({ message: 'sectionId is required for internal mode' });
@@ -45,6 +48,13 @@ async function postContext(req, res) {
         metadata: { title },
         lastUpdated: now,
       };
+
+      if (incomingParagraph) {
+        const cleaned = cleanText(incomingParagraph);
+        update.paragraph = cleaned.length > INTERNAL_CONTEXT_MAX_PARAGRAPH_CHARS
+          ? cleaned.slice(0, INTERNAL_CONTEXT_MAX_PARAGRAPH_CHARS)
+          : cleaned;
+      }
 
       // Important: don't wipe out uploaded contentId when tracking reading position.
       // Allow client to pass contentId (best), otherwise keep existing contentId.

@@ -161,6 +161,15 @@ function pickNeighborSectionIds(sectionId) {
 async function buildStudyExcerpt({ studyContext, topic, maxChars }) {
   if (!studyContext) return '';
 
+  const sectionId = typeof studyContext.sectionId === 'string' ? studyContext.sectionId.trim() : '';
+
+  // PDF page-specific help: when the client posts sectionId like "p5" and a paragraph,
+  // prefer that paragraph over upload-time contentMap sections (s1/s2/...).
+  if (/^p\d+$/i.test(sectionId)) {
+    const raw = (typeof studyContext.paragraph === 'string' ? studyContext.paragraph : '') || '';
+    if (raw) return clampText(raw, maxChars);
+  }
+
   // Prefer content-backed excerpts for uploaded/internal study sessions.
   const contentId = studyContext.contentId ? String(studyContext.contentId) : '';
   if (!contentId) {
@@ -175,7 +184,6 @@ async function buildStudyExcerpt({ studyContext, topic, maxChars }) {
     return clampText(raw, maxChars);
   }
 
-  const sectionId = typeof studyContext.sectionId === 'string' ? studyContext.sectionId.trim() : '';
   let selected = [];
 
   if (sectionId) {

@@ -43,11 +43,16 @@ export function StudyView() {
   const pdfScrollContainerRef = useRef<HTMLDivElement | null>(null);
   const docxScrollContainerRef = useRef<HTMLDivElement | null>(null);
   const pauseTimerRef = useRef<number | null>(null);
-  const lastSentContextRef = useRef<{ sectionId: string; topic: string } | null>(null);
+  const lastSentContextRef = useRef<{ sectionId: string; topic: string; paragraph: string } | null>(null);
   const lastHelpShownAtMsRef = useRef<number>(0);
   const pdfDocProxyRef = useRef<any | null>(null);
   const pdfDocLoadingRef = useRef<Promise<any> | null>(null);
   const pdfPageTopicCacheRef = useRef<Map<number, string>>(new Map());
+  const pdfPageTextCacheRef = useRef<Map<number, string>>(new Map());
+
+  const helpLockedSectionIdRef = useRef<string | null>(null);
+  const helpLockedTopicRef = useRef<string | null>(null);
+  const helpLockedPageRef = useRef<number | null>(null);
 
   // Live face snapshot (attention & emotion), forwarded from FaceTrackingPopup.
   const faceSnapshotRef = useRef<FaceTrackerSnapshot | null>(null);
@@ -206,12 +211,6 @@ export function StudyView() {
     }
   }, [API, currentTopic, ensureUserId, helpLoaded, helpLoading, helpTopic, user?.userId]);
 
-  // When the popup opens (only on confusion), load the real explanation immediately.
-  useEffect(() => {
-    if (!showHelp) return;
-    void fetchExplainIfNeeded();
-  }, [fetchExplainIfNeeded, showHelp]);
-
   const onHelpShowMore = useCallback(async () => {
     // Only call /api/explain when the user requests more (moving from Level 1 -> Level 2).
     if (helpLevel === 1 && !helpLoaded && !helpLoading) {
@@ -252,6 +251,32 @@ export function StudyView() {
     setHelpAnswerLoading(true);
     setHelpAnswer('Thinking...');
     try {
+      if (fileType === 'pdf') {
+        const lockedSectionId = helpLockedSectionIdRef.current;
+        const lockedTopic = helpLockedTopicRef.current;
+        const lockedPage = helpLockedPageRef.current;
+        if (lockedSectionId && lockedTopic && lockedPage) {
+          const paragraph = pdfPageTextCacheRef.current.get(lockedPage) || '';
+          try {
+            await fetch(`${API}/api/context`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                userId,
+                agentActive: true,
+                topic: lockedTopic,
+                sectionId: lockedSectionId,
+                paragraph: paragraph || undefined,
+                contentId: contentId || undefined,
+                metadata: { title: uploadedTitle || undefined },
+              }),
+            });
+          } catch {
+            // ignore
+          }
+        }
+      }
+
       const resp = await fetch(`${API}/api/ask-doubt`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -265,7 +290,7 @@ export function StudyView() {
     } finally {
       setHelpAnswerLoading(false);
     }
-  }, [API, helpDoubt, helpTopic, user?.userId]);
+  }, [API, contentId, fileType, helpDoubt, uploadedTitle, user?.userId]);
 
   const detectTopicClient = useCallback((rawText: string) => {
     const text = String(rawText || '').toLowerCase();
@@ -309,7 +334,12 @@ export function StudyView() {
     pdfDocProxyRef.current = null;
     pdfDocLoadingRef.current = null;
     pdfPageTopicCacheRef.current.clear();
+    pdfPageTextCacheRef.current.clear();
     lastSentContextRef.current = null;
+
+    helpLockedSectionIdRef.current = null;
+    helpLockedTopicRef.current = null;
+    helpLockedPageRef.current = null;
 
     // Reset behavior features for new document
     lastScrollAtMsRef.current = Date.now();
@@ -335,12 +365,13 @@ export function StudyView() {
     }
   }, [absoluteFileUrl]);
 
-  const getPdfPageTopic = useCallback(async (pageNumber: number) => {
-    const cached = pdfPageTopicCacheRef.current.get(pageNumber);
+  const getPdfPageText = useCallback(async (pageNumber: number) => {
+    const cached = pdfPageTextCacheRef.current.get(pageNumber);
     if (cached) return cached;
 
     const doc = await getPdfDocProxy();
-    if (!doc) return 'General';
+    if (!doc) return '';
+
     try {
       const page = await doc.getPage(pageNumber);
       const textContent = await page.getTextContent();
@@ -351,27 +382,53 @@ export function StudyView() {
             .join(' ')
         : '';
 
-      let topic = detectTopicClient(joined);
+      const normalized = String(joined || '').replace(/\s+/g, ' ').trim();
+      const MAX_PAGE_TEXT_CHARS = 2200;
+      const clamped = normalized.length > MAX_PAGE_TEXT_CHARS ? normalized.slice(0, MAX_PAGE_TEXT_CHARS) : normalized;
+
+      pdfPageTextCacheRef.current.set(pageNumber, clamped);
+      return clamped;
+    } catch {
+      return '';
+    }
+  }, [getPdfDocProxy]);
+
+  const getPdfPageTopic = useCallback(async (pageNumber: number) => {
+    const cached = pdfPageTopicCacheRef.current.get(pageNumber);
+    if (cached) return cached;
+
+    try {
+      const pageText = await getPdfPageText(pageNumber);
+      let topic = detectTopicClient(pageText);
       if (topic === 'General') {
-        topic = await detectTopicServer(joined);
+        topic = await detectTopicServer(pageText);
       }
       pdfPageTopicCacheRef.current.set(pageNumber, topic);
       return topic;
     } catch {
       return 'General';
     }
-  }, [detectTopicClient, detectTopicServer, getPdfDocProxy]);
+  }, [detectTopicClient, detectTopicServer, getPdfPageText]);
 
   const postInternalContext = useCallback(
-    async ({ topic, sectionId }: { topic: string; sectionId: string }) => {
+    async ({ topic, sectionId, paragraph }: { topic: string; sectionId: string; paragraph?: string }) => {
       if (!agentActive) return;
 
       const normalizedTopic = String(topic || '').trim() || 'General';
       const normalizedSectionId = String(sectionId || '').trim();
       if (!normalizedSectionId) return;
 
+      const normalizedParagraph = String(paragraph || '').trim();
+
       const last = lastSentContextRef.current;
-      if (last && last.sectionId === normalizedSectionId && last.topic === normalizedTopic) return;
+      if (
+        last
+        && last.sectionId === normalizedSectionId
+        && last.topic === normalizedTopic
+        && last.paragraph === normalizedParagraph
+      ) {
+        return;
+      }
 
       const userId = await ensureUserId();
       if (!userId) return;
@@ -385,6 +442,7 @@ export function StudyView() {
             agentActive: true,
             topic: normalizedTopic,
             sectionId: normalizedSectionId,
+            paragraph: normalizedParagraph || undefined,
             contentId: contentId || undefined,
             metadata: { title: uploadedTitle || undefined },
           }),
@@ -393,7 +451,7 @@ export function StudyView() {
         // ignore network errors; still update UI for responsiveness
       }
 
-      lastSentContextRef.current = { sectionId: normalizedSectionId, topic: normalizedTopic };
+      lastSentContextRef.current = { sectionId: normalizedSectionId, topic: normalizedTopic, paragraph: normalizedParagraph };
       setCurrentTopic(normalizedTopic);
     },
     [API, agentActive, contentId, ensureUserId, setCurrentTopic, uploadedTitle]
@@ -422,6 +480,63 @@ export function StudyView() {
 
     return bestPage;
   }, []);
+
+  const lockHelpToCurrentPdfPageIfNeeded = useCallback(async () => {
+    if (!showHelp) return;
+    if (fileType !== 'pdf') return;
+    if (helpLockedPageRef.current && helpLockedSectionIdRef.current && helpLockedTopicRef.current) return;
+
+    const container = pdfScrollContainerRef.current;
+    if (!container) return;
+
+    const pageNumber = findMostVisibleDataPage(container);
+    if (!pageNumber) return;
+
+    const sectionId = `p${pageNumber}`;
+    const pageText = await getPdfPageText(pageNumber);
+    const topic = await getPdfPageTopic(pageNumber);
+    await postInternalContext({ sectionId, topic, paragraph: pageText });
+
+    helpLockedPageRef.current = pageNumber;
+    helpLockedSectionIdRef.current = sectionId;
+    helpLockedTopicRef.current = topic;
+  }, [fileType, findMostVisibleDataPage, getPdfPageText, getPdfPageTopic, postInternalContext, showHelp]);
+
+  useEffect(() => {
+    if (showHelp) return;
+    helpLockedPageRef.current = null;
+    helpLockedSectionIdRef.current = null;
+    helpLockedTopicRef.current = null;
+  }, [showHelp]);
+
+  useEffect(() => {
+    if (!showHelp) return;
+
+    let cancelled = false;
+
+    (async () => {
+      if (fileType === 'pdf') {
+        await lockHelpToCurrentPdfPageIfNeeded();
+
+        const lockedPage = helpLockedPageRef.current;
+        const lockedSectionId = helpLockedSectionIdRef.current;
+        const lockedTopic = helpLockedTopicRef.current;
+
+        if (lockedPage && lockedSectionId && lockedTopic) {
+          const pageText = await getPdfPageText(lockedPage);
+          await postInternalContext({ sectionId: lockedSectionId, topic: lockedTopic, paragraph: pageText });
+          if (!cancelled) setHelpTopic(lockedTopic);
+        }
+      }
+
+      if (cancelled) return;
+      await fetchExplainIfNeeded();
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [fetchExplainIfNeeded, fileType, getPdfPageText, lockHelpToCurrentPdfPageIfNeeded, postInternalContext, showHelp]);
 
   const findMostVisibleHeading = useCallback((container: HTMLDivElement) => {
     const headings = Array.from(container.querySelectorAll<HTMLElement>('h1,h2,h3'));
@@ -452,8 +567,9 @@ export function StudyView() {
       if (!container) return;
       const pageNumber = findMostVisibleDataPage(container);
       if (!pageNumber) return;
+      const pageText = await getPdfPageText(pageNumber);
       const topic = await getPdfPageTopic(pageNumber);
-      await postInternalContext({ topic, sectionId: `p${pageNumber}` });
+      await postInternalContext({ topic, sectionId: `p${pageNumber}`, paragraph: pageText });
       return;
     }
 
@@ -484,6 +600,7 @@ export function StudyView() {
     fileType,
     findMostVisibleDataPage,
     findMostVisibleHeading,
+    getPdfPageText,
     getPdfPageTopic,
     postInternalContext,
   ]);

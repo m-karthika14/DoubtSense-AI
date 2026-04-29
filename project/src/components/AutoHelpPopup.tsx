@@ -43,7 +43,7 @@ export function AutoHelpPopup({
             transition={{ type: 'spring', damping: 25, stiffness: 300 }}
             className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-[92vw] max-w-2xl"
           >
-            <div className="glassmorphic rounded-3xl p-8 shadow-2xl">
+            <div className="rounded-3xl p-8 shadow-2xl backdrop-blur-xl bg-white/70 dark:bg-slate-950/80 border border-white/20 dark:border-white/10">
               <div className="flex items-start justify-between mb-4">
                 <div className="flex items-center gap-3">
                   <motion.div
@@ -62,7 +62,7 @@ export function AutoHelpPopup({
                 </div>
                 <button
                   onClick={onClose}
-                  className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
+                  className="text-gray-400 hover:text-gray-600 dark:text-gray-400 dark:hover:text-gray-200 transition-colors"
                 >
                   <X className="w-5 h-5" />
                 </button>
