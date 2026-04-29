@@ -326,9 +326,18 @@ router.post('/explain', requireUserId, async (req, res) => {
 
     const topic = requestedTopic || picked.topic || 'General';
 
-    const contextText = selectedSource === 'web'
-      ? buildWebExcerpt({ webContext, maxChars: CONTEXT_PARAGRAPH_MAX_CHARS })
-      : await buildStudyExcerpt({ studyContext, topic, maxChars: CONTEXT_PARAGRAPH_MAX_CHARS });
+    // If the client sends the visible paragraph directly (e.g. from PDF page at popup-open time),
+    // use it as-is so we never fail the insufficient-excerpt check due to DB lag or pdfjs issues.
+    const bodyParagraph = typeof req.body.paragraph === 'string' ? req.body.paragraph.trim() : '';
+
+    let contextText;
+    if (bodyParagraph.length >= INSUFFICIENT_EXCERPT_MIN_CHARS) {
+      contextText = clampText(bodyParagraph, CONTEXT_PARAGRAPH_MAX_CHARS);
+    } else {
+      contextText = selectedSource === 'web'
+        ? buildWebExcerpt({ webContext, maxChars: CONTEXT_PARAGRAPH_MAX_CHARS })
+        : await buildStudyExcerpt({ studyContext, topic, maxChars: CONTEXT_PARAGRAPH_MAX_CHARS });
+    }
 
     // Hallucination guardrail: do not call the LLM if we don't have enough excerpt.
     // Keep response shape stable (HTTP 200, same keys).
@@ -342,9 +351,12 @@ router.post('/explain', requireUserId, async (req, res) => {
       });
     }
 
-    // Cache check (biggest impact)
-    const cacheKey = makeExplainCacheKey({ topic, selectedSource, studyContext, webContext });
-    if (explanationCache.has(cacheKey)) {
+    // Cache check — skip when the client supplied a direct paragraph so fresh
+    // page content is never shadowed by a stale DB-keyed cache entry.
+    const cacheKey = bodyParagraph
+      ? null
+      : makeExplainCacheKey({ topic, selectedSource, studyContext, webContext });
+    if (cacheKey && explanationCache.has(cacheKey)) {
       console.log('[explain] CACHE HIT topic=%s source=%s', topic, selectedSource);
       return res.json({ topic, ...explanationCache.get(cacheKey) });
     }
@@ -443,8 +455,7 @@ Rules:
 
     const parsed = safeParseLevels(text);
     if (parsed) {
-      // Store in cache for future calls.
-      explanationCache.set(cacheKey, parsed);
+      if (cacheKey) explanationCache.set(cacheKey, parsed);
       return res.json({ topic, ...parsed });
     }
 
@@ -516,9 +527,16 @@ router.post('/ask-doubt', requireUserId, async (req, res) => {
 
     const trimmedQuestion = question.slice(0, 2000);
 
-    const contextText = selectedSource === 'web'
-      ? buildWebExcerpt({ webContext, maxChars: DOUBT_CONTEXT_MAX_CHARS })
-      : await buildStudyExcerpt({ studyContext, topic, maxChars: DOUBT_CONTEXT_MAX_CHARS });
+    const doubtBodyParagraph = typeof req.body.paragraph === 'string' ? req.body.paragraph.trim() : '';
+
+    let contextText;
+    if (doubtBodyParagraph.length >= INSUFFICIENT_EXCERPT_MIN_CHARS) {
+      contextText = clampText(doubtBodyParagraph, DOUBT_CONTEXT_MAX_CHARS);
+    } else {
+      contextText = selectedSource === 'web'
+        ? buildWebExcerpt({ webContext, maxChars: DOUBT_CONTEXT_MAX_CHARS })
+        : await buildStudyExcerpt({ studyContext, topic, maxChars: DOUBT_CONTEXT_MAX_CHARS });
+    }
 
     if (isInsufficientExcerpt(contextText, { source: selectedSource })) {
       console.log('[ask-doubt] INSUFFICIENT CONTEXT topic=%s source=%s', topic, selectedSource);

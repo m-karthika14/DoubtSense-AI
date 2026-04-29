@@ -53,6 +53,7 @@ export function StudyView() {
   const helpLockedSectionIdRef = useRef<string | null>(null);
   const helpLockedTopicRef = useRef<string | null>(null);
   const helpLockedPageRef = useRef<number | null>(null);
+  const helpLockedParagraphRef = useRef<string | null>(null);
 
   // Live face snapshot (attention & emotion), forwarded from FaceTrackingPopup.
   const faceSnapshotRef = useRef<FaceTrackerSnapshot | null>(null);
@@ -167,7 +168,7 @@ export function StudyView() {
     }
   }, [guest, user?.userId]);
 
-  const fetchExplainIfNeeded = useCallback(async () => {
+  const fetchExplainIfNeeded = useCallback(async (directParagraph?: string, directTopic?: string) => {
     if (helpLoaded || helpLoading) return;
 
     const userId = user?.userId || (await ensureUserId());
@@ -180,10 +181,18 @@ export function StudyView() {
     const timeoutId = window.setTimeout(() => controller.abort(), 25000);
 
     try {
+      // Always fall back to the locked refs so Show More also sends the visible page text
+      const reqParagraph = directParagraph || helpLockedParagraphRef.current || undefined;
+      const reqTopic = directTopic || helpLockedTopicRef.current || undefined;
+
+      const body: Record<string, unknown> = { userId, agentActive: true, mode: 'study' };
+      if (reqParagraph) body.paragraph = reqParagraph;
+      if (reqTopic) body.topic = reqTopic;
+
       const resp = await fetch(`${API}/api/explain`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId, agentActive: true, mode: 'study' }),
+        body: JSON.stringify(body),
         signal: controller.signal,
       });
 
@@ -194,7 +203,7 @@ export function StudyView() {
       }
 
       const topic = typeof data?.topic === 'string' && data.topic.trim() ? data.topic.trim() : helpTopic;
-      setHelpTopic(topic);
+      setHelpTopic(topic || helpTopic);
       setHelpExplanations({
         level1: typeof data?.level1 === 'string' ? data.level1 : '',
         level2: typeof data?.level2 === 'string' ? data.level2 : '',
@@ -254,9 +263,8 @@ export function StudyView() {
       if (fileType === 'pdf') {
         const lockedSectionId = helpLockedSectionIdRef.current;
         const lockedTopic = helpLockedTopicRef.current;
-        const lockedPage = helpLockedPageRef.current;
-        if (lockedSectionId && lockedTopic && lockedPage) {
-          const paragraph = pdfPageTextCacheRef.current.get(lockedPage) || '';
+        const paragraph = String(helpLockedParagraphRef.current || '').trim();
+        if (lockedSectionId && lockedTopic) {
           try {
             await fetch(`${API}/api/context`, {
               method: 'POST',
@@ -277,10 +285,16 @@ export function StudyView() {
         }
       }
 
+      const lockedPara = String(helpLockedParagraphRef.current || '').trim();
+      const lockedTpc = String(helpLockedTopicRef.current || '').trim();
+      const doubtBody: Record<string, unknown> = { userId, mode: 'study', question };
+      if (lockedPara) doubtBody.paragraph = lockedPara;
+      if (lockedTpc) doubtBody.topic = lockedTpc;
+
       const resp = await fetch(`${API}/api/ask-doubt`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId, mode: 'study', question }),
+        body: JSON.stringify(doubtBody),
       });
       const data = await resp.json().catch(() => ({}));
       const answer = typeof data?.answer === 'string' ? data.answer : '';
@@ -340,6 +354,7 @@ export function StudyView() {
     helpLockedSectionIdRef.current = null;
     helpLockedTopicRef.current = null;
     helpLockedPageRef.current = null;
+    helpLockedParagraphRef.current = null;
 
     // Reset behavior features for new document
     lastScrollAtMsRef.current = Date.now();
@@ -392,6 +407,26 @@ export function StudyView() {
       return '';
     }
   }, [getPdfDocProxy]);
+
+  const getPdfHelpParagraph = useCallback(async (pageNumber: number) => {
+    const base = await getPdfPageText(pageNumber);
+
+    // If the page has very little extractable text (e.g., mostly diagrams), expand to neighbors.
+    const MIN_HELP_CHARS = 200;
+    if (base.length >= MIN_HELP_CHARS) return base;
+
+    const parts: string[] = [];
+    const prev = pageNumber - 1 >= 1 ? await getPdfPageText(pageNumber - 1) : '';
+    const next = pageNumber + 1 <= (numPages || pageNumber + 1) ? await getPdfPageText(pageNumber + 1) : '';
+
+    if (prev) parts.push(prev);
+    if (base) parts.push(base);
+    if (next) parts.push(next);
+
+    const joined = parts.join('\n\n---\n\n').trim();
+    const MAX_HELP_CHARS = 2200;
+    return joined.length > MAX_HELP_CHARS ? joined.slice(0, MAX_HELP_CHARS) : joined;
+  }, [getPdfPageText, numPages]);
 
   const getPdfPageTopic = useCallback(async (pageNumber: number) => {
     const cached = pdfPageTopicCacheRef.current.get(pageNumber);
@@ -493,20 +528,22 @@ export function StudyView() {
     if (!pageNumber) return;
 
     const sectionId = `p${pageNumber}`;
-    const pageText = await getPdfPageText(pageNumber);
+    const pageText = await getPdfHelpParagraph(pageNumber);
     const topic = await getPdfPageTopic(pageNumber);
     await postInternalContext({ sectionId, topic, paragraph: pageText });
 
     helpLockedPageRef.current = pageNumber;
     helpLockedSectionIdRef.current = sectionId;
     helpLockedTopicRef.current = topic;
-  }, [fileType, findMostVisibleDataPage, getPdfPageText, getPdfPageTopic, postInternalContext, showHelp]);
+    helpLockedParagraphRef.current = pageText;
+  }, [fileType, findMostVisibleDataPage, getPdfHelpParagraph, getPdfPageTopic, postInternalContext, showHelp]);
 
   useEffect(() => {
     if (showHelp) return;
     helpLockedPageRef.current = null;
     helpLockedSectionIdRef.current = null;
     helpLockedTopicRef.current = null;
+    helpLockedParagraphRef.current = null;
   }, [showHelp]);
 
   useEffect(() => {
@@ -515,28 +552,34 @@ export function StudyView() {
     let cancelled = false;
 
     (async () => {
+      let capturedParagraph: string | undefined;
+      let capturedTopic: string | undefined;
+
       if (fileType === 'pdf') {
         await lockHelpToCurrentPdfPageIfNeeded();
 
         const lockedPage = helpLockedPageRef.current;
         const lockedSectionId = helpLockedSectionIdRef.current;
         const lockedTopic = helpLockedTopicRef.current;
+        const lockedParagraph = helpLockedParagraphRef.current;
 
         if (lockedPage && lockedSectionId && lockedTopic) {
-          const pageText = await getPdfPageText(lockedPage);
-          await postInternalContext({ sectionId: lockedSectionId, topic: lockedTopic, paragraph: pageText });
+          const paragraph = lockedParagraph || (await getPdfHelpParagraph(lockedPage));
+          await postInternalContext({ sectionId: lockedSectionId, topic: lockedTopic, paragraph });
           if (!cancelled) setHelpTopic(lockedTopic);
+          capturedParagraph = paragraph || undefined;
+          capturedTopic = lockedTopic;
         }
       }
 
       if (cancelled) return;
-      await fetchExplainIfNeeded();
+      await fetchExplainIfNeeded(capturedParagraph, capturedTopic);
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [fetchExplainIfNeeded, fileType, getPdfPageText, lockHelpToCurrentPdfPageIfNeeded, postInternalContext, showHelp]);
+  }, [fetchExplainIfNeeded, fileType, getPdfHelpParagraph, lockHelpToCurrentPdfPageIfNeeded, postInternalContext, showHelp]);
 
   const findMostVisibleHeading = useCallback((container: HTMLDivElement) => {
     const headings = Array.from(container.querySelectorAll<HTMLElement>('h1,h2,h3'));
@@ -775,7 +818,31 @@ export function StudyView() {
           const lastShown = lastHelpShownAtMsRef.current || 0;
           if (nowMs - lastShown >= HELP_POPUP_COOLDOWN_MS) {
             lastHelpShownAtMsRef.current = nowMs;
-            setHelpTopic(payload.topic);
+
+            // Pre-lock visible page content into refs BEFORE opening the popup so
+            // both the auto explain call and any immediate "Show More" click can
+            // use the paragraph without waiting for the effect to resolve.
+            if (fileType === 'pdf' && pdfScrollContainerRef.current) {
+              const pageNum = findMostVisibleDataPage(pdfScrollContainerRef.current);
+              if (pageNum && !helpLockedPageRef.current) {
+                const sId = `p${pageNum}`;
+                try {
+                  const [para, tpc] = await Promise.all([
+                    getPdfHelpParagraph(pageNum),
+                    getPdfPageTopic(pageNum),
+                  ]);
+                  helpLockedPageRef.current = pageNum;
+                  helpLockedSectionIdRef.current = sId;
+                  helpLockedParagraphRef.current = para;
+                  helpLockedTopicRef.current = tpc;
+                  void postInternalContext({ sectionId: sId, topic: tpc, paragraph: para });
+                } catch {
+                  // ignore — popup still opens, effect will retry
+                }
+              }
+            }
+
+            setHelpTopic(helpLockedTopicRef.current || payload.topic);
             setShowHelp(true);
           }
         }
